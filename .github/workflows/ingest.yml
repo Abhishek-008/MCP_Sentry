@@ -1,0 +1,53 @@
+name: Ingest MCP Tool
+
+on:
+  workflow_dispatch:
+    inputs:
+      repoUrl:
+        description: 'Target GitHub Repo URL'
+        required: true
+      toolId:
+        description: 'Supabase Tool ID'
+        required: true
+      startCommand:
+        description: 'Command to start the server'
+        required: true
+      userId:
+        description: 'User ID'
+        required: true
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout Monorepo
+        uses: actions/checkout@v4
+
+      # 1. Setup PNPM (Crucial for Monorepo)
+      - name: Install pnpm
+        uses: pnpm/action-setup@v3
+        with:
+          version: 9
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+
+      # 2. Install Dependencies (Root + Workspaces)
+      - name: Install Dependencies
+        run: pnpm install --frozen-lockfile
+
+      # 3. Run the Inspector Script
+      # We pass the inputs as Environment Variables
+      - name: Run Inspector
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          TARGET_REPO_URL: ${{ inputs.repoUrl }}
+          TOOL_ID: ${{ inputs.toolId }}
+          START_CMD: ${{ inputs.startCommand }}
+          USER_ID: ${{ inputs.userId }}
+        run: npx tsx scripts/inspector.ts

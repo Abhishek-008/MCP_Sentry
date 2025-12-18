@@ -1,0 +1,17 @@
+{
+  "name": "mcp-sentry",
+  "private": true,
+  "scripts": {
+    "dev": "concurrently \"pnpm --filter mcp-platform dev\" \"pnpm --filter mcp-gateway dev\"",
+    "build": "pnpm -r run build",
+    "install:all": "pnpm install"
+  },
+  "devDependencies": {
+    "@supabase/supabase-js": "^2.88.0",
+    "archiver": "^7.0.1",
+    "concurrently": "^9.0.0",
+    "dotenv": "^17.2.3",
+    "execa": "^9.6.1",
+    "tsx": "^4.21.0"
+  }
+}
