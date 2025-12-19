@@ -21,7 +21,7 @@ export class MCPExecutor {
     constructor(cwd: string, startCommand: string, env: NodeJS.ProcessEnv = {}) {
         this.cwd = cwd;
         this.startCommand = startCommand;
-        this.env = env;
+        this.env = env; // Secrets are stored here
     }
 
     async executeTool(toolName: string, args: any): Promise<any> {
@@ -45,8 +45,10 @@ export class MCPExecutor {
             throw new Error(`Invalid start command: ${this.startCommand}`);
         }
 
+        // INJECTION POINT: This is where secrets enter the process
         this.process = spawn(cmd, args, {
             cwd: this.cwd,
+            // Merge System Env + Tool Secrets (this.env)
             env: { ...process.env, ...this.env, PATH: process.env.PATH },
             shell: true
         });
@@ -63,9 +65,14 @@ export class MCPExecutor {
                 return reject(new Error('Process not started'));
             }
 
+            // Step 1: Send Initialize Request
             const initRequest = JSON.stringify({
                 jsonrpc: "2.0", id: 0, method: "initialize",
-                params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "gateway", version: "1.0" } }
+                params: {
+                    protocolVersion: "2024-11-05",
+                    capabilities: {},
+                    clientInfo: { name: "gateway", version: "1.0" }
+                }
             }) + "\n";
 
             const onData = (data: Buffer) => {
@@ -75,12 +82,13 @@ export class MCPExecutor {
                     try {
                         const json = JSON.parse(line);
 
-                        // Step 2: Initialize Response
+                        // Step 2: Receive Initialize Response
                         if (json.id === 0 && json.result) {
+                            // Step 3: Send Initialized Notification
                             const notify = JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) + "\n";
                             this.process?.stdin?.write(notify);
 
-                            // Remove listener and resolve
+                            // Remove handshake listener and resolve
                             this.process?.stdout?.off('data', onData);
                             this.isInitialized = true;
                             resolve();
@@ -94,7 +102,10 @@ export class MCPExecutor {
 
             // Fail if handshake takes too long
             setTimeout(() => {
-                if (!this.isInitialized) reject(new Error('Handshake timeout'));
+                if (!this.isInitialized) {
+                    this.kill();
+                    reject(new Error('Handshake timeout'));
+                }
             }, 5000);
         });
     }
