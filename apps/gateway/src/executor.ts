@@ -40,7 +40,10 @@ export class MCPExecutor {
     private startServer() {
         console.log(`[Executor] Booting: ${this.startCommand}`);
         const [cmd, ...args] = this.startCommand.split(' ');
-        if (!cmd) throw new Error('Start command is empty');
+
+        if (!cmd) {
+            throw new Error(`Invalid start command: ${this.startCommand}`);
+        }
 
         this.process = spawn(cmd, args, {
             cwd: this.cwd,

@@ -56,7 +56,7 @@ export async function POST(req: Request) {
                     client_payload: {
                         tool_id: tool.id,
                         repo_url: repoUrl,
-                        start_command: startCommand // <--- Passing to GitHub Action
+                        start_command: startCommand
                     }
                 })
             }

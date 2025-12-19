@@ -61,6 +61,19 @@ app.post('/api/execute', async (req, res): Promise<any> => {
             .eq('id', toolId)
             .single();
 
+        const { data: secrets } = await supabase
+            .from('tool_secrets')
+            .select('key, value')
+            .eq('tool_id', toolId);
+
+        // Convert array [{key: 'A', value: 'B'}] to object { A: 'B' }
+        const secretEnv: NodeJS.ProcessEnv = {};
+        if (secrets) {
+            secrets.forEach(s => {
+                secretEnv[s.key] = s.value;
+            });
+        }
+
         if (!tool || !tool.bundle_path) {
             return res.status(404).json({ error: 'Tool not found or not built' });
         }
@@ -78,9 +91,12 @@ app.post('/api/execute', async (req, res): Promise<any> => {
         // Here, we let Default Args override User Args to force safety (like robots.txt)
         // Or strictly merge:
         const finalArgs = { ...userArgs, ...defaultArgs };
-
+        const finalEnv = {
+            ...toolEnv,
+            ...secretEnv
+        };
         // D. Execution
-        const executor = new MCPExecutor(toolDir, tool.start_command, toolEnv);
+        const executor = new MCPExecutor(toolDir, tool.start_command, finalEnv);
 
         // Execute with timeout handling via Promise.race if needed (executor has internal 30s)
         const result = await executor.executeTool(toolName, finalArgs);
