@@ -9,7 +9,7 @@ const supabaseAdmin = createClient(
 export async function POST(req: Request) {
     try {
         // 1. Parse Request (Added startCommand)
-        const { repoUrl, userId, startCommand } = await req.json();
+        const { repoUrl, userId, startCommand, configuration } = await req.json();
 
         if (!repoUrl || !repoUrl.startsWith('https://github.com/')) {
             return NextResponse.json({ error: 'Invalid GitHub URL' }, { status: 400 });
@@ -56,7 +56,9 @@ export async function POST(req: Request) {
                     client_payload: {
                         tool_id: tool.id,
                         repo_url: repoUrl,
-                        start_command: startCommand
+                        start_command: startCommand,
+                        user_id: userId,
+                        configuration: configuration || {}
                     }
                 })
             }

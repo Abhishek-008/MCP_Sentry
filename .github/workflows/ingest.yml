@@ -46,8 +46,8 @@ jobs:
 
       - name: Run Inspector
         env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           # Fallback logic simplified
           TARGET_REPO_URL: ${{ github.event.client_payload.repo_url || inputs.repoUrl }}
           TOOL_ID: ${{ github.event.client_payload.tool_id || inputs.toolId }}

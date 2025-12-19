@@ -9,6 +9,8 @@ const supabase = createClient(process.env.SUPABASE_URL!, process.env.SUPABASE_KE
 const TOOL_ID = process.env.TOOL_ID!;
 const REPO_URL = process.env.TARGET_REPO_URL!;
 const START_CMD = process.env.START_CMD!;
+const USER_ID = process.env.USER_ID!;
+const CONFIGURATION = process.env.CONFIGURATION!;
 
 const workDir = path.resolve('./temp_repo');
 const artifactPath = path.resolve('./artifact.zip');
