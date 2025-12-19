@@ -1,4 +1,5 @@
 import { spawn, ChildProcess } from 'child_process';
+import path from 'path';
 
 interface MCPResponse {
     result?: {
@@ -21,15 +22,13 @@ export class MCPExecutor {
     constructor(cwd: string, startCommand: string, env: NodeJS.ProcessEnv = {}) {
         this.cwd = cwd;
         this.startCommand = startCommand;
-        this.env = env; // Secrets are stored here
+        this.env = env;
     }
 
     async executeTool(toolName: string, args: any): Promise<any> {
         try {
             await this.startServer();
             await this.performHandshake();
-
-            // Send the actual execution request
             const result = await this.callTool(toolName, args);
             return result;
         } finally {
@@ -37,26 +36,79 @@ export class MCPExecutor {
         }
     }
 
+    // --- HELPER: Resolve Absolute Path for Windows ---
+    private normalizeCommand(fullCommand: string): string {
+        // Split "cmd" from "args" (e.g. ".venv/bin/python" and "-m notion_mcp")
+        const [binary = '', ...args] = fullCommand.split(' ');
+
+        if (process.platform === 'win32') {
+            console.log('[Executor] Applying Windows path fixes...');
+
+            let safeBinary = binary;
+
+            // 1. Fix Slashes
+            safeBinary = safeBinary.replace(/\//g, '\\');
+
+            // 2. Fix venv path mapping (bin -> Scripts)
+            if (safeBinary.includes('.venv\\bin\\python')) {
+                safeBinary = safeBinary.replace('.venv\\bin\\python', '.venv\\Scripts\\python.exe');
+            }
+
+            // 3. FORCE ABSOLUTE PATH
+            // If it looks like a relative path inside the tool dir, make it absolute.
+            if (safeBinary.startsWith('.venv') || safeBinary.startsWith('node')) {
+                // If it starts with .venv, resolve it against cwd
+                if (safeBinary.startsWith('.venv')) {
+                    safeBinary = path.resolve(this.cwd, safeBinary);
+                }
+                // (Optional) If it is 'node', we usually leave it to system PATH, 
+                // but for venv python, we must be specific.
+            }
+
+            // Reassemble
+            return `${safeBinary} ${args.join(' ')}`;
+        }
+
+        return fullCommand;
+    }
+    // ------------------------------------------------
+
     private startServer() {
-        console.log(`[Executor] Booting: ${this.startCommand}`);
-        const [cmd, ...args] = this.startCommand.split(' ');
+        // 1. Normalize
+        const safeCommand = this.normalizeCommand(this.startCommand);
+        console.log(`[Executor] Booting: ${safeCommand}`);
+
+        // 2. Split again for spawn
+        // We need to respect spaces in paths if we had them, but for now simple split is fine
+        // because our auto-generated paths don't have spaces.
+        let newPath = process.env.PATH;
+
+        if (this.startCommand.includes('.venv')) {
+            const venvBin = process.platform === 'win32'
+                ? path.resolve(this.cwd, '.venv', 'Scripts')
+                : path.resolve(this.cwd, '.venv', 'bin');
+
+            // Prepend to PATH (Windows uses ';', Linux uses ':')
+            const delimiter = process.platform === 'win32' ? ';' : ':';
+            newPath = `${venvBin}${delimiter}${process.env.PATH}`;
+        }
+
+        const [cmd, ...args] = safeCommand.split(' ');
 
         if (!cmd) {
             throw new Error(`Invalid start command: ${this.startCommand}`);
         }
 
-        // INJECTION POINT: This is where secrets enter the process
         this.process = spawn(cmd, args, {
             cwd: this.cwd,
-            // Merge System Env + Tool Secrets (this.env)
-            env: { ...process.env, ...this.env, PATH: process.env.PATH },
+            // Use the enhanced PATH
+            env: { ...process.env, ...this.env, PATH: newPath },
             shell: true
         });
 
         this.process?.stderr?.on('data', (data) => console.error(`[Tool Log] ${data}`));
 
-        // Safety timeout
-        setTimeout(() => this.kill(), 30000); // Max 30s runtime
+        setTimeout(() => this.kill(), 60000);
     }
 
     private performHandshake(): Promise<void> {
@@ -65,7 +117,6 @@ export class MCPExecutor {
                 return reject(new Error('Process not started'));
             }
 
-            // Step 1: Send Initialize Request
             const initRequest = JSON.stringify({
                 jsonrpc: "2.0", id: 0, method: "initialize",
                 params: {
@@ -82,13 +133,10 @@ export class MCPExecutor {
                     try {
                         const json = JSON.parse(line);
 
-                        // Step 2: Receive Initialize Response
                         if (json.id === 0 && json.result) {
-                            // Step 3: Send Initialized Notification
                             const notify = JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) + "\n";
                             this.process?.stdin?.write(notify);
 
-                            // Remove handshake listener and resolve
                             this.process?.stdout?.off('data', onData);
                             this.isInitialized = true;
                             resolve();
@@ -100,13 +148,12 @@ export class MCPExecutor {
             this.process.stdout.on('data', onData);
             this.process.stdin.write(initRequest);
 
-            // Fail if handshake takes too long
             setTimeout(() => {
                 if (!this.isInitialized) {
                     this.kill();
                     reject(new Error('Handshake timeout'));
                 }
-            }, 5000);
+            }, 15000);
         });
     }
 
