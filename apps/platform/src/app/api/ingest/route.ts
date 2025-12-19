@@ -29,6 +29,7 @@ export async function POST(req: Request) {
                 user_id: userId,
                 repo_url: repoUrl,
                 start_command: startCommand, // <--- Saving to DB
+                configuration: configuration || {},
                 status: 'pending'
             })
             .select()
