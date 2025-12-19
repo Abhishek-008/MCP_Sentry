@@ -8,14 +8,11 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 // --- Configuration ---
-// Note: In GitHub Actions, these map to NEXT_PUBLIC_SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY
-// via the yaml env mapping we set up earlier.
 const supabase = createClient(process.env.SUPABASE_URL!, process.env.SUPABASE_KEY!);
 const TOOL_ID = process.env.TOOL_ID!;
 const REPO_URL = process.env.TARGET_REPO_URL!;
 const START_CMD = process.env.START_CMD!;
 const USER_ID = process.env.USER_ID!;
-const CONFIGURATION = process.env.CONFIGURATION!;
 
 const workDir = path.resolve('./temp_repo');
 const artifactPath = path.resolve('./artifact.zip');
@@ -32,7 +29,6 @@ async function getSecrets(toolId: string) {
         return {};
     }
 
-    // Transform: [{key: "API_KEY", value: "123"}] => { "API_KEY": "123" }
     const secretMap: NodeJS.ProcessEnv = {};
     if (secrets) {
         secrets.forEach(s => {
@@ -52,25 +48,30 @@ async function main() {
 
         execSync(`git clone ${REPO_URL} ${workDir}`);
 
-        // 2. Install Dependencies (Universal Logic)
+        // 2. Install Dependencies
         installDependencies(workDir);
 
         // 3. Fetch Secrets (API Keys)
-        // We need these so the server doesn't crash on boot if it checks os.environ immediately
         console.log('[Inspector] Fetching secrets for introspection...');
         const secrets = await getSecrets(TOOL_ID);
-        const injectionEnv = { ...process.env, ...secrets };
+
+        // MERGE ENVS: System + Secrets + Python Fixes
+        const injectionEnv = {
+            ...process.env,
+            ...secrets,
+            // CRITICAL FIX: Force Python to not buffer output
+            PYTHONUNBUFFERED: '1',
+            // CRITICAL FIX: Ensure local imports work in the tool directory
+            PYTHONPATH: workDir
+        };
 
         // 4. Introspection (Handshake)
         console.log(`[Inspector] Booting server with: "${START_CMD}"...`);
-
-        // Pass the injected env to the runner
         const tools = await fetchToolsFromRunningServer(START_CMD, workDir, injectionEnv);
         console.log(`[Inspector] Successfully discovered ${tools.length} tools.`);
 
         // 5. Packing (Create Zip)
         console.log('[Inspector] Creating Snapshot Artifact...');
-        // We EXCLUDE node_modules/venv to keep the zip small.
         await createZipArtifact(workDir, artifactPath, ['node_modules', '.git', '.venv', '__pycache__']);
 
         // 6. Upload to Supabase
@@ -115,55 +116,33 @@ async function main() {
 function installDependencies(cwd: string) {
     console.log('[Inspector] Detecting project type...');
 
-    // NODE.JS
     if (fs.existsSync(path.join(cwd, 'package.json'))) {
         console.log('-> Detected Node.js project');
+        try { execSync('npm install', { cwd, stdio: 'inherit' }); } catch (e) { }
 
-        if (fs.existsSync(path.join(cwd, 'pnpm-lock.yaml'))) {
-            try { execSync('npm install -g pnpm', { stdio: 'ignore' }); } catch (e) { }
-            execSync('pnpm install', { cwd, stdio: 'inherit' });
-        }
-        else if (fs.existsSync(path.join(cwd, 'yarn.lock'))) {
-            execSync('yarn install --frozen-lockfile', { cwd, stdio: 'inherit' });
-        }
-        else {
-            execSync('npm install', { cwd, stdio: 'inherit' });
-        }
-
-        // Build Step
+        // Build if needed
         const pkg = JSON.parse(fs.readFileSync(path.join(cwd, 'package.json'), 'utf-8'));
         if (pkg.scripts && pkg.scripts.build) {
-            console.log('   Running build script...');
-            const runner = fs.existsSync(path.join(cwd, 'pnpm-lock.yaml')) ? 'pnpm' :
-                fs.existsSync(path.join(cwd, 'yarn.lock')) ? 'yarn' : 'npm';
-            execSync(`${runner} run build`, { cwd, stdio: 'inherit' });
+            execSync(`npm run build`, { cwd, stdio: 'inherit' });
         }
     }
-    // PYTHON
     else if (fs.existsSync(path.join(cwd, 'pyproject.toml')) || fs.existsSync(path.join(cwd, 'requirements.txt'))) {
         console.log('-> Detected Python project');
 
-        // Create venv for isolation
+        // Re-create venv cleanly
         execSync('python3 -m venv .venv', { cwd, stdio: 'inherit' });
 
-        // Determine pip path (Windows vs Linux)
         const pip = process.platform === 'win32'
             ? path.join('.venv', 'Scripts', 'pip')
             : path.join('.venv', 'bin', 'pip');
 
-        // Upgrade pip
         try { execSync(`${pip} install --upgrade pip`, { cwd, stdio: 'inherit' }); } catch (e) { }
 
-        if (fs.existsSync(path.join(cwd, 'uv.lock'))) {
-            execSync(`${pip} install uv`, { cwd, stdio: 'inherit' });
-            execSync(`uv sync`, { cwd, stdio: 'inherit' }); // Note: UV might need venv activation logic, fallback to pip often safer for simple scripts
-        } else {
-            if (fs.existsSync(path.join(cwd, 'requirements.txt'))) {
-                execSync(`${pip} install -r requirements.txt`, { cwd, stdio: 'inherit' });
-            }
-            if (fs.existsSync(path.join(cwd, 'pyproject.toml'))) {
-                execSync(`${pip} install .`, { cwd, stdio: 'inherit' });
-            }
+        if (fs.existsSync(path.join(cwd, 'requirements.txt'))) {
+            execSync(`${pip} install -r requirements.txt`, { cwd, stdio: 'inherit' });
+        }
+        if (fs.existsSync(path.join(cwd, 'pyproject.toml'))) {
+            execSync(`${pip} install .`, { cwd, stdio: 'inherit' });
         }
     }
 }
@@ -172,14 +151,17 @@ function fetchToolsFromRunningServer(command: string, cwd: string, env: NodeJS.P
     return new Promise((resolve, reject) => {
         const [cmd, ...args] = command.split(' ');
 
-        // Spawn with INJECTED ENV (Secrets)
+        // Spawn with INJECTED ENV (Secrets + PYTHONUNBUFFERED)
         const serverProcess = spawn(cmd, args, { cwd, env: env, shell: true });
 
         let buffer = '';
         let isInitialized = false;
 
         serverProcess.stdout.on('data', (data) => {
-            buffer += data.toString();
+            const chunk = data.toString();
+            console.log(`[Server stdout] ${chunk}`); // DEBUG LOG
+
+            buffer += chunk;
             const lines = buffer.split('\n');
             buffer = lines.pop() || '';
 
@@ -188,42 +170,52 @@ function fetchToolsFromRunningServer(command: string, cwd: string, env: NodeJS.P
                 try {
                     const json = JSON.parse(line);
 
-                    // Handshake Step 2: Receive Initialize Result
+                    // Step 2: Receive Initialize Result
                     if (json.id === 0 && json.result) {
-                        // Handshake Step 3: Send Initialized Notification
+                        console.log('[Handshake] Server Initialized. Sending notification...');
                         const initNotification = JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) + "\n";
                         serverProcess.stdin.write(initNotification);
 
-                        // Handshake Step 4: Ask for Tools
+                        console.log('[Handshake] Requesting tools...');
                         const toolsRequest = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }) + "\n";
                         serverProcess.stdin.write(toolsRequest);
                         isInitialized = true;
                     }
 
-                    // Handshake Step 5: Receive Tools
+                    // Step 3: Receive Tools
                     if (json.id === 1 && json.result && json.result.tools) {
+                        console.log('[Handshake] Tools received!');
                         resolve(json.result.tools);
                         serverProcess.kill();
                     }
-                } catch (e) { }
+
+                    if (json.error) {
+                        console.error('[Handshake Error]', json.error);
+                    }
+
+                } catch (e) {
+                    // Ignore non-JSON lines (logs)
+                }
             }
         });
 
-        serverProcess.stderr.on('data', (data) => console.error(`[Server Log] ${data}`));
+        serverProcess.stderr.on('data', (data) => console.error(`[Server stderr] ${data}`));
 
-        // Handshake Step 1: Send Initialize Request
+        // Step 1: Send Initialize Request
         const initRequest = JSON.stringify({
             jsonrpc: "2.0", id: 0, method: "initialize",
             params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "inspector", version: "1.0" } }
         }) + "\n";
+
+        console.log('[Handshake] Sending initialize request...');
         serverProcess.stdin.write(initRequest);
 
         setTimeout(() => {
             if (!isInitialized) {
                 serverProcess.kill();
-                reject(new Error("Timeout: Handshake failed (15s)"));
+                reject(new Error("Timeout: Handshake failed (20s). Check Server stderr logs above."));
             }
-        }, 15000);
+        }, 20000); // Increased timeout to 20s
     });
 }
 
@@ -246,3 +238,5 @@ function createZipArtifact(sourceDir: string, outPath: string, ignoreList: strin
         archive.finalize();
     });
 }
+
+main();
