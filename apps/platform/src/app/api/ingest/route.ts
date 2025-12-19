@@ -39,8 +39,32 @@ export async function POST(req: Request) {
             return NextResponse.json({ error: 'Database Insert Failed' }, { status: 500 });
         }
 
+        if (configuration && configuration.env) {
+            const secretsToInsert = Object.entries(configuration.env).map(([key, value]) => ({
+                tool_id: tool.id,
+                key: key,
+                value: value as string
+            }));
+
+            if (secretsToInsert.length > 0) {
+                const { error: secretError } = await supabaseAdmin
+                    .from('tool_secrets')
+                    .insert(secretsToInsert);
+
+                if (secretError) {
+                    console.error('Secret Insert Error:', secretError);
+                    // We don't stop the process, but we log it.
+                } else {
+                    console.log(`[Ingest] Secured ${secretsToInsert.length} secrets.`);
+                }
+            }
+        }
+
         // 3. Trigger GitHub Action (Pass start_command in payload)
-        const [owner, repo] = process.env.GITHUB_PLATFORM_REPO!.split('/');
+        const githubRepo = process.env.GITHUB_PLATFORM_REPO; // "User/Repo"
+        if (!githubRepo) throw new Error("Missing GITHUB_PLATFORM_REPO env var");
+
+        const [owner, repo] = githubRepo.split('/');
 
         const githubResponse = await fetch(
             `https://api.github.com/repos/${owner}/${repo}/dispatches`,
