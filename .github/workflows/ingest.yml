@@ -1,13 +1,58 @@
 name: Ingest MCP Tool
 
 on:
-  workflow_dispatch:
   repository_dispatch:
     types: [ingest_tool]
+  workflow_dispatch:
+    inputs:
+      repoUrl:
+        description: 'Repo URL'
+        required: true
+      toolId:
+        description: 'Tool ID'
+        required: true
+      startCommand:
+        description: 'Start Command'
+        required: true
+      userId:
+        description: 'User ID'
+        required: true
+      configuration:
+        description: 'JSON Config'
+        required: false
+        default: '{}'
 
 jobs:
-  debug:
+  ingest:
     runs-on: ubuntu-latest
+    
     steps:
-      - name: Say Hello
-        run: echo "GitHub Actions is working!"
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v3
+        with:
+          version: 9
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+
+      - name: Install Dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run Inspector
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          # Fallback logic simplified
+          TARGET_REPO_URL: ${{ github.event.client_payload.repo_url || inputs.repoUrl }}
+          TOOL_ID: ${{ github.event.client_payload.tool_id || inputs.toolId }}
+          START_CMD: ${{ github.event.client_payload.start_command || inputs.startCommand }}
+          USER_ID: ${{ github.event.client_payload.user_id || inputs.userId }}
+          # SAFE JSON HANDLING: If payload exists, use it; otherwise use input; otherwise empty object
+          CONFIGURATION: ${{ github.event.client_payload.configuration && toJson(github.event.client_payload.configuration) || inputs.configuration || '{}' }}
+        run: npx tsx scripts/inspector.ts
