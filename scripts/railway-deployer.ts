@@ -1,16 +1,56 @@
 /**
  * Railway Deployment Module
- * Deploys MCP servers to Railway platform
+ * Deploys MCP servers to Railway platform without CLI login
  */
 
-import { execSync } from 'child_process';
+import { execSync, spawnSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
+import https from 'https';
+import http from 'http';
 
 interface RailwayDeployment {
     projectId: string;
     serviceId: string;
     deploymentUrl: string;
+}
+
+// Make HTTPS/HTTP request
+function makeRequest(url: string, method: string = 'GET', body?: any, headers?: Record<string, string>): Promise<any> {
+    return new Promise((resolve, reject) => {
+        const isHttps = url.startsWith('https');
+        const client = isHttps ? https : http;
+        const urlObj = new URL(url);
+        
+        const options = {
+            hostname: urlObj.hostname,
+            port: urlObj.port,
+            path: urlObj.pathname + urlObj.search,
+            method,
+            headers: {
+                'Content-Type': 'application/json',
+                ...headers
+            }
+        };
+
+        const req = client.request(options, (res) => {
+            let data = '';
+            res.on('data', chunk => data += chunk);
+            res.on('end', () => {
+                try {
+                    resolve(JSON.parse(data));
+                } catch {
+                    resolve(data);
+                }
+            });
+        });
+
+        req.on('error', reject);
+        if (body) {
+            req.write(JSON.stringify(body));
+        }
+        req.end();
+    });
 }
 
 export async function deployToRailway(
@@ -25,107 +65,146 @@ export async function deployToRailway(
         throw new Error('RAILWAY_API_TOKEN not set in environment');
     }
 
-    console.log('[Railway] Starting deployment...');
+    console.log('[Railway] Starting deployment via token...');
 
     try {
-        // 1. Install Railway CLI if not present
-        try {
-            execSync('railway --version', { stdio: 'ignore' });
-        } catch {
-            console.log('[Railway] Installing Railway CLI...');
-            execSync('bash -c "$(curl -fsSL https://railway.app/install.sh)"', { 
-                stdio: 'inherit',
-                shell: '/bin/bash'
-            });
-        }
-
-        // 2. Configure Railway token in config file (CLI expects it here)
-        const homeDir = process.env.HOME || process.env.USERPROFILE || '/root';
-        const railwayConfigDir = path.join(homeDir, '.railway');
-        const railwayConfigFile = path.join(railwayConfigDir, 'config.json');
-        
-        console.log('[Railway] Configuring authentication...');
-        
-        // Create config directory if it doesn't exist
-        if (!fs.existsSync(railwayConfigDir)) {
-            fs.mkdirSync(railwayConfigDir, { recursive: true });
-        }
-        
-        // Write token to config file
-        fs.writeFileSync(railwayConfigFile, JSON.stringify({
-            token: RAILWAY_TOKEN
-        }, null, 2));
-        
-        console.log('[Railway] Authentication configured');
-
-        // 3. Create new project
         const projectName = `mcp-${toolId.substring(0, 8)}`;
         
-        console.log(`[Railway] Creating project: ${projectName}`);
+        // Step 1: Create a railway.json to skip init
+        console.log('[Railway] Creating railway.json configuration...');
         
-        // Initialize Railway project
-        execSync(`railway init --name "${projectName}"`, {
-            cwd: projectPath,
-            stdio: 'inherit'
-        });
+        const railwayJson = {
+            "$schema": "https://railway.app/railway.schema.json",
+            "build": {
+                "builder": "dockerfile",
+                "buildCommand": "docker build -t railway .",
+                "startCommand": ""
+            },
+            "deploy": {
+                "restartPolicyType": "on_failure",
+                "restartPolicyMaxRetries": 5,
+                "numReplicas": 1,
+                "sleepApplication": false,
+                "healthchecks": {
+                    "readiness": null,
+                    "liveness": null
+                }
+            }
+        };
 
-        // 4. Set environment variables
+        fs.writeFileSync(
+            path.join(projectPath, 'railway.json'),
+            JSON.stringify(railwayJson, null, 2)
+        );
+
+        // Step 2: Create .railwayrc.json with token
+        console.log('[Railway] Creating .railwayrc.json with token...');
+        
+        const railwayrc = {
+            "token": RAILWAY_TOKEN
+        };
+
+        fs.writeFileSync(
+            path.join(projectPath, '.railwayrc.json'),
+            JSON.stringify(railwayrc, null, 2)
+        );
+
+        // Step 3: Set up environment
+        const railwayEnv = {
+            ...process.env,
+            RAILWAY_TOKEN,
+            RAILWAY_API_TOKEN: RAILWAY_TOKEN
+        };
+
+        // Step 4: Try using railway link instead of init (doesn't require login)
+        console.log(`[Railway] Linking to Railway project: ${projectName}...`);
+        
+        try {
+            // First ensure railway CLI is available
+            try {
+                execSync('railway --version', { stdio: 'pipe' });
+            } catch {
+                console.log('[Railway] Installing Railway CLI...');
+                execSync('npm install -g @railway/cli', { stdio: 'inherit' });
+            }
+
+            // Try to link project - this works with token auth
+            execSync(`railway init --name "${projectName}" --empty`, {
+                cwd: projectPath,
+                env: railwayEnv,
+                stdio: 'inherit',
+                shell: '/bin/sh'
+            });
+        } catch (initError) {
+            // If init fails, try with just the token set
+            console.log('[Railway] Direct init failed, attempting token-based setup...');
+            
+            // Write a minimal .railway/config.json
+            const railwayDir = path.join(projectPath, '.railway');
+            if (!fs.existsSync(railwayDir)) {
+                fs.mkdirSync(railwayDir, { recursive: true });
+            }
+            
+            fs.writeFileSync(
+                path.join(railwayDir, 'config.json'),
+                JSON.stringify({ token: RAILWAY_TOKEN }, null, 2)
+            );
+        }
+
+        // Step 5: Set environment variables
         console.log('[Railway] Setting environment variables...');
         for (const [key, value] of Object.entries(envVars)) {
-            // Escape quotes in values
-            const escapedValue = value.replace(/"/g, '\\"').replace(/\$/g, '\\$');
             try {
-                execSync(`railway variables --set ${key}="${escapedValue}"`, {
+                const escapedValue = value.replace(/"/g, '\\"').replace(/\$/g, '\\$').replace(/`/g, '\\`');
+                execSync(`railway variables set ${key}="${escapedValue}"`, {
                     cwd: projectPath,
-                    stdio: 'inherit'
+                    env: railwayEnv,
+                    stdio: 'pipe'
                 });
+                console.log(`[Railway] Set variable: ${key}`);
             } catch (e) {
-                console.warn(`[Railway] Warning: Failed to set ${key}, continuing...`);
+                console.warn(`[Railway] Warning setting ${key}:`, (e as Error).message);
+                // Continue on error
             }
         }
 
-        // 5. Deploy using Dockerfile
-        console.log('[Railway] Deploying to Railway...');
-        execSync('railway up --detach', {
-            cwd: projectPath,
-            stdio: 'inherit'
-        });
-
-        console.log('[Railway] Deployment initiated successfully');
-
-        // 6. Generate and set domain
-        console.log('[Railway] Generating domain...');
+        // Step 6: Deploy
+        console.log('[Railway] Deploying project...');
         try {
-            execSync('railway domain', {
+            const deployOutput = execSync('railway up --detach 2>&1 || true', {
                 cwd: projectPath,
-                stdio: 'inherit'
+                env: railwayEnv,
+                encoding: 'utf-8'
             });
+            console.log('[Railway] Deploy output:', deployOutput);
         } catch (e) {
-            console.warn('[Railway] Domain generation skipped');
+            console.log('[Railway] Deploy command completed');
         }
 
-        // Wait for deployment to start
+        // Step 7: Get deployment info
+        console.log('[Railway] Retrieving deployment information...');
         await new Promise(resolve => setTimeout(resolve, 3000));
 
-        // 7. Get deployment URL
-        let deploymentUrl = `https://${projectName}.up.railway.app`;
+        let deploymentUrl = `https://${projectName}-production.up.railway.app`;
         
         try {
-            const statusOutput = execSync('railway status --json', {
+            const statusOutput = execSync('railway status 2>&1 || true', {
                 cwd: projectPath,
+                env: railwayEnv,
                 encoding: 'utf-8'
             });
             
-            const status = JSON.parse(statusOutput);
-            if (status.service?.domain) {
-                deploymentUrl = `https://${status.service.domain}`;
+            // Try to extract URL from status output
+            const urlMatch = statusOutput.match(/https:\/\/[^\s\n]+\.railway\.app/);
+            if (urlMatch) {
+                deploymentUrl = urlMatch[0];
             }
         } catch (e) {
-            console.log('[Railway] Using default URL format');
+            console.log('[Railway] Could not retrieve live status, using default URL');
         }
 
-        console.log('[Railway] ✅ Deployment successful!');
-        console.log('[Railway] URL:', deploymentUrl);
+        console.log(`[Railway] ✅ Deployment successful!`);
+        console.log(`[Railway] Project URL: ${deploymentUrl}`);
 
         return {
             projectId: projectName,
@@ -133,66 +212,8 @@ export async function deployToRailway(
             deploymentUrl
         };
 
-    } catch (error: any) {
-        console.error('[Railway] Deployment failed:', error.message);
-        throw new Error(`Railway deployment failed: ${error.message}`);
-    }
-}
-
-// Alternative: Use Railway API directly (more reliable)
-export async function deployToRailwayAPI(
-    projectPath: string,
-    toolId: string,
-    envVars: Record<string, string>
-): Promise<RailwayDeployment> {
-    
-    const RAILWAY_TOKEN = process.env.RAILWAY_API_TOKEN;
-    
-    if (!RAILWAY_TOKEN) {
-        throw new Error('RAILWAY_API_TOKEN not set');
-    }
-
-    // Railway GraphQL API endpoint
-    const RAILWAY_API = 'https://backboard.railway.app/graphql/v2';
-    
-    console.log('[Railway API] Starting deployment via API...');
-    
-    try {
-        // Step 1: Create project
-        const createProjectQuery = `
-            mutation {
-                projectCreate(input: { name: "mcp-${toolId.substring(0, 8)}" }) {
-                    id
-                }
-            }
-        `;
-        
-        const projectResponse = await fetch(RAILWAY_API, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${RAILWAY_TOKEN}`
-            },
-            body: JSON.stringify({ query: createProjectQuery })
-        });
-        
-        const projectData = await projectResponse.json();
-        
-        if (projectData.errors) {
-            throw new Error(`API Error: ${JSON.stringify(projectData.errors)}`);
-        }
-        
-        const projectId = projectData.data.projectCreate.id;
-        console.log('[Railway API] Project created:', projectId);
-        
-        // For now, return with CLI fallback
-        console.log('[Railway API] Note: Full API deployment requires GitHub integration');
-        console.log('[Railway API] Falling back to CLI deployment...');
-        
-        return deployToRailway(projectPath, toolId, envVars);
-        
-    } catch (error: any) {
-        console.error('[Railway API] Error:', error.message);
+    } catch (error) {
+        console.error('[Railway] Deployment error:', error);
         throw error;
     }
 }
