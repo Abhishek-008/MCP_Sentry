@@ -44,6 +44,31 @@ jobs:
       - name: Install Dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Clone and Install Python Dependencies
+        env:
+          TARGET_REPO_URL: ${{ github.event.client_payload.repo_url || inputs.repoUrl }}
+        run: |
+          if [ ! -z "$TARGET_REPO_URL" ]; then
+            # Clone the repo
+            git clone "$TARGET_REPO_URL" temp_repo || true
+            
+            # Install Python dependencies if requirements.txt exists
+            if [ -f "temp_repo/requirements.txt" ]; then
+              echo "Installing Python dependencies..."
+              pip install -r temp_repo/requirements.txt
+            else
+              echo "No requirements.txt found, installing fastmcp as fallback..."
+              pip install fastmcp>=2.0.0
+            fi
+          else
+            pip install fastmcp>=2.0.0
+          fi
+
       - name: Run Inspector
         env:
           SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
