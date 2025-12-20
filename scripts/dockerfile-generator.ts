@@ -43,17 +43,19 @@ COPY . .
 # Build if necessary
 RUN if [ -f "tsconfig.json" ]; then ${usePnpm ? 'pnpm' : 'npm'} run build || true; fi
 
-# Copy HTTP wrapper
-COPY mcp-http-wrapper.js ./
+# Copy HTTP wrapper if it exists, otherwise expect compiled code
+RUN if [ ! -f "mcp-http-wrapper.js" ]; then echo "Wrapper not found, will use direct start command"; fi
 
 # Expose port
 EXPOSE 3000
 
 # Set start command as environment variable
 ENV START_COMMAND="${startCommand}"
+ENV NODE_ENV=production
+ENV LOG_LEVEL=debug
 
-# Start the HTTP wrapper
-CMD ["node", "mcp-http-wrapper.js"]
+# Try to start with wrapper if it exists, otherwise run start command directly
+CMD if [ -f "mcp-http-wrapper.js" ]; then node mcp-http-wrapper.js; else sh -c "$START_COMMAND"; fi
 `;
 }
 
@@ -104,9 +106,10 @@ EXPOSE 3000
 # Set start command as environment variable
 ENV START_COMMAND="${startCommand}"
 ENV PYTHONUNBUFFERED=1
+ENV LOG_LEVEL=debug
 
-# Start the HTTP wrapper
-CMD ["node", "mcp-http-wrapper.js"]
+# Try to start with wrapper if it exists, otherwise run start command directly
+CMD if [ -f "mcp-http-wrapper.js" ]; then node mcp-http-wrapper.js; else sh -c "$START_COMMAND"; fi
 `;
 }
 
