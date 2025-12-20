@@ -40,11 +40,12 @@ export async function deployToRailway(
             }
         }
 
-        // 2. Login to Railway
-        execSync(`railway login --browserless`, {
-            env: { ...process.env, RAILWAY_TOKEN },
-            stdio: 'inherit'
-        });
+        // 2. Set Railway token in environment (no login needed)
+        console.log('[Railway] Authenticating with API token...');
+        const railwayEnv = { 
+            ...process.env, 
+            RAILWAY_TOKEN 
+        };
 
         // 3. Create new project or link to existing
         const projectName = `mcp-${toolId.substring(0, 8)}`;
@@ -54,7 +55,7 @@ export async function deployToRailway(
         // Initialize Railway project
         execSync(`railway init -n ${projectName}`, {
             cwd: projectPath,
-            env: { ...process.env, RAILWAY_TOKEN },
+            env: railwayEnv,
             stdio: 'inherit'
         });
 
@@ -65,7 +66,7 @@ export async function deployToRailway(
             const escapedValue = value.replace(/"/g, '\\"');
             execSync(`railway variables set ${key}="${escapedValue}"`, {
                 cwd: projectPath,
-                env: { ...process.env, RAILWAY_TOKEN },
+                env: railwayEnv,
                 stdio: 'inherit'
             });
         }
@@ -74,7 +75,7 @@ export async function deployToRailway(
         console.log('[Railway] Deploying to Railway...');
         const deployOutput = execSync('railway up --detach', {
             cwd: projectPath,
-            env: { ...process.env, RAILWAY_TOKEN },
+            env: railwayEnv,
             encoding: 'utf-8'
         });
 
@@ -86,7 +87,7 @@ export async function deployToRailway(
         // Generate domain
         execSync('railway domain', {
             cwd: projectPath,
-            env: { ...process.env, RAILWAY_TOKEN },
+            env: railwayEnv,
             stdio: 'inherit'
         });
 
@@ -96,7 +97,7 @@ export async function deployToRailway(
         // Get the deployment info
         const statusOutput = execSync('railway status', {
             cwd: projectPath,
-            env: { ...process.env, RAILWAY_TOKEN },
+            env: railwayEnv,
             encoding: 'utf-8'
         });
 
