@@ -1,0 +1,29 @@
+{
+  "name": "mcp-sentry",
+  "private": true,
+  "scripts": {
+    "dev": "concurrently \"pnpm --filter mcp-platform dev\" \"pnpm --filter mcp-gateway dev\"",
+    "build": "pnpm -r run build",
+    "install:all": "pnpm install",
+    "validate": "node scripts/validate-deployment.js",
+    "setup": "node setup.js"
+  },
+  "devDependencies": {
+    "@supabase/supabase-js": "^2.88.0",
+    "@types/archiver": "^7.0.0",
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.6",
+    "@types/node": "^20",
+    "adm-zip": "^0.5.16",
+    "archiver": "^7.0.1",
+    "concurrently": "^9.0.0",
+    "cors": "^2.8.5",
+    "dotenv": "^17.2.3",
+    "esbuild": "^0.27.2",
+    "execa": "^9.6.1",
+    "express": "^5.2.1",
+    "fs-extra": "^11.3.2",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3"
+  }
+}
