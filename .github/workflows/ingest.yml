@@ -69,11 +69,31 @@ jobs:
             pip install fastmcp>=2.0.0
           fi
 
+      - name: Setup Railway CLI and authenticate
+        env:
+          RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+        run: |
+          echo "Installing Railway CLI..."
+          curl -fsSL https://railway.app/install.sh | sh
+          
+          # Verify token is set
+          if [ -z "$RAILWAY_API_TOKEN" ]; then
+            echo "❌ Error: RAILWAY_API_TOKEN is not set in secrets"
+            exit 1
+          fi
+          
+          echo "✅ Railway API token is configured"
+          
+          # Test Railway connection
+          export RAILWAY_TOKEN=$RAILWAY_API_TOKEN
+          railway whoami || echo "⚠️  Warning: Could not verify Railway auth, will attempt deployment anyway"
+
       - name: Run Inspector
         env:
           SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
           # Fallback logic simplified
           TARGET_REPO_URL: ${{ github.event.client_payload.repo_url || inputs.repoUrl }}
           TOOL_ID: ${{ github.event.client_payload.tool_id || inputs.toolId }}

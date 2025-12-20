@@ -52,12 +52,23 @@ export async function deployToRailway(
         
         console.log(`[Railway] Creating project: ${projectName}`);
         
-        // Initialize Railway project
-        execSync(`railway init -n ${projectName}`, {
-            cwd: projectPath,
-            env: railwayEnv,
-            stdio: 'inherit'
-        });
+        // Initialize Railway project with --no-input flag for CI environments
+        try {
+            execSync(`railway init -n ${projectName} --no-input`, {
+                cwd: projectPath,
+                env: railwayEnv,
+                stdio: 'inherit'
+            });
+        } catch (e) {
+            // If --no-input doesn't work, try basic init
+            console.log('[Railway] Retrying init without --no-input...');
+            execSync(`railway init -n ${projectName}`, {
+                cwd: projectPath,
+                env: railwayEnv,
+                input: '\n',  // Provide empty input for prompts
+                stdio: 'inherit'
+            });
+        }
 
         // 4. Set environment variables
         console.log('[Railway] Setting environment variables...');
