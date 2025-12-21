@@ -33,14 +33,14 @@ export default function Header() {
         router.push('/');
     };
 
-    const isActive = (path: string) => pathname === path 
-        ? "text-emerald-400 bg-emerald-500/10" 
+    const isActive = (path: string) => pathname === path
+        ? "text-emerald-400 bg-emerald-500/10"
         : "text-gray-400 hover:text-white hover:bg-white/5";
 
     return (
         <header className="border-b border-gray-800 bg-black/50 backdrop-blur-md sticky top-0 z-40">
             <div className="max-w-7xl mx-auto px-6 h-16 flex items-center justify-between">
-                
+
                 {/* Logo & Navigation */}
                 <div className="flex items-center gap-8">
                     <Link href="/" className="flex items-center gap-3 group">
@@ -56,19 +56,26 @@ export default function Header() {
                     {/* Navigation - Only visible if logged in */}
                     {user && (
                         <nav className="hidden md:flex items-center gap-1">
-                            <Link 
-                                href="/dashboard" 
+                            <Link
+                                href="/dashboard"
                                 className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium transition-all ${isActive('/dashboard')}`}
                             >
                                 <LayoutDashboard className="w-4 h-4" />
                                 Dashboard
                             </Link>
-                            <Link 
-                                href="/deploy" 
+                            <Link
+                                href="/deploy"
                                 className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium transition-all ${isActive('/deploy')}`}
                             >
                                 <PlusCircle className="w-4 h-4" />
                                 Register Server
+                            </Link>
+                            <Link
+                                href="/client"
+                                className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium transition-all ${isActive('/client')}`}
+                            >
+                                <code className="text-xs font-bold">{'>_'}</code>
+                                Client
                             </Link>
                         </nav>
                     )}
@@ -91,7 +98,7 @@ export default function Header() {
                             </button>
                         </div>
                     ) : (
-                        <Link 
+                        <Link
                             href="/login"
                             className="text-sm font-mono font-medium text-emerald-400 hover:text-emerald-300 transition-colors"
                         >
