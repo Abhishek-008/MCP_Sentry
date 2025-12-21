@@ -55,25 +55,36 @@ async function main() {
         console.log('[Inspector] Fetching secrets for introspection...');
         const secrets = await getSecrets(TOOL_ID);
 
-        // MERGE ENVS: System + Secrets + Python Fixes
+        // 4. PREPARE ENVIRONMENT
+        // Calculate the VENV bin path to inject into PATH
+        const venvBin = process.platform === 'win32'
+            ? path.resolve(workDir, '.venv', 'Scripts')
+            : path.resolve(workDir, '.venv', 'bin');
+
+        // Prepend venv bin to PATH. 
+        // This ensures 'uv', 'python', 'pip' commands use the venv versions.
+        const delimiter = process.platform === 'win32' ? ';' : ':';
+        const newPath = `${venvBin}${delimiter}${process.env.PATH}`;
+
         const injectionEnv = {
             ...process.env,
             ...secrets,
-            PYTHONUNBUFFERED: '1', // Force Python to not buffer output
+            PATH: newPath,           // <--- CRITICAL FIX: Allows 'uv' and 'python' to be found
+            PYTHONUNBUFFERED: '1',   // Force Python to not buffer output
             PYTHONPATH: workDir      // Ensure local imports work
         };
 
-        // 4. Introspection (Handshake)
+        // 5. Introspection (Handshake)
         console.log(`[Inspector] Booting server with: "${START_CMD}"...`);
         const tools = await fetchToolsFromRunningServer(START_CMD, workDir, injectionEnv);
         console.log(`[Inspector] Successfully discovered ${tools.length} tools.`);
 
-        // 5. Packing (Create Zip)
+        // 6. Packing (Create Zip)
         console.log('[Inspector] Creating Snapshot Artifact...');
         // Exclude heavy/unnecessary folders
         await createZipArtifact(workDir, artifactPath, ['node_modules', '.git', '.venv', '__pycache__', 'dist', 'build']);
 
-        // 6. Upload to Supabase
+        // 7. Upload to Supabase
         console.log('[Inspector] Uploading Snapshot...');
         const fileContent = fs.readFileSync(artifactPath);
         const storagePath = `snapshots/${TOOL_ID}.zip`;
@@ -84,7 +95,7 @@ async function main() {
 
         if (uploadError) throw uploadError;
 
-        // 7. Update Database
+        // 8. Update Database
         const manifest = {
             generated_at: new Date().toISOString(),
             source: REPO_URL,
@@ -145,27 +156,29 @@ function installDependencies(cwd: string) {
         // 2. Upgrade pip
         try { execSync(`${pip} install --upgrade pip`, { cwd, stdio: 'inherit' }); } catch (e) { }
 
-        // 3. Install Requirements (Critical)
+        // 3. Install 'uv' (CRITICAL ROBUSTNESS FIX)
+        // Many new tools use 'uv run', so we must ensure 'uv' is in the venv.
+        console.log('   Installing uv support...');
+        try { execSync(`${pip} install uv`, { cwd, stdio: 'inherit' }); } catch (e) { }
+
+        // 4. Install Requirements
         if (fs.existsSync(path.join(cwd, 'requirements.txt'))) {
             console.log('   Installing requirements.txt...');
             try {
                 execSync(`${pip} install -r requirements.txt`, { cwd, stdio: 'inherit' });
             } catch (e) {
-                console.error('   ❌ Failed to install requirements.txt. This is usually fatal.');
-                throw e; // We re-throw here because missing deps usually mean nothing works
+                console.error('   ❌ Failed to install requirements.txt.');
+                throw e;
             }
         }
 
-        // 4. Install Project (Optional / Best Effort)
+        // 5. Install Project (Best Effort)
         if (fs.existsSync(path.join(cwd, 'pyproject.toml'))) {
             console.log('   Attempting to build/install project...');
             try {
-                // This is what failed before. We now wrap it.
                 execSync(`${pip} install .`, { cwd, stdio: 'inherit' });
             } catch (e) {
-                console.warn('   ⚠️ Warning: Could not install project as a package (pip install . failed).');
-                console.warn('      Continuing with dependencies only. This is common for flat-layout repos.');
-                // We DO NOT throw here. We let it proceed.
+                console.warn('   ⚠️ Warning: Could not install project as a package. Continuing with dependencies.');
             }
         }
     }
@@ -180,7 +193,7 @@ function fetchToolsFromRunningServer(command: string, cwd: string, env: NodeJS.P
 
         let buffer = '';
         let isInitialized = false;
-        let stderrLog = ''; // Capture errors to report why it crashed
+        let stderrLog = '';
 
         // --- ROBUSTNESS: Handle Early Exit ---
         serverProcess.on('error', (err) => {
@@ -195,8 +208,6 @@ function fetchToolsFromRunningServer(command: string, cwd: string, env: NodeJS.P
 
         // --- ROBUSTNESS: Handle Broken Pipes on Stdin ---
         serverProcess.stdin.on('error', (err) => {
-            // This ignores the EPIPE error specifically, preventing the crash.
-            // We rely on the 'exit' handler above to report the actual failure.
             if ((err as any).code !== 'EPIPE') {
                 console.error('[Inspector] Stdin Error:', err);
             }
@@ -204,7 +215,7 @@ function fetchToolsFromRunningServer(command: string, cwd: string, env: NodeJS.P
 
         serverProcess.stdout.on('data', (data) => {
             const chunk = data.toString();
-            // console.log(`[Server stdout] ${chunk}`); // Uncomment for deep debug
+            // console.log(`[Server stdout] ${chunk}`); 
 
             buffer += chunk;
             const lines = buffer.split('\n');
@@ -230,11 +241,6 @@ function fetchToolsFromRunningServer(command: string, cwd: string, env: NodeJS.P
                         resolve(json.result.tools);
                         serverProcess.kill();
                     }
-
-                    if (json.error) {
-                        console.error('[Handshake Error]', json.error);
-                    }
-
                 } catch (e) { }
             }
         });
@@ -251,7 +257,6 @@ function fetchToolsFromRunningServer(command: string, cwd: string, env: NodeJS.P
             params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "inspector", version: "1.0" } }
         }) + "\n";
 
-        // Write safely
         if (!serverProcess.stdin.destroyed) {
             serverProcess.stdin.write(initRequest);
         }
