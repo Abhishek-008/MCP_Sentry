@@ -1,5 +1,6 @@
 import { spawn, ChildProcess } from 'child_process';
 import path from 'path';
+import fs from 'fs';
 
 interface MCPResponse {
     result?: {
@@ -36,79 +37,74 @@ export class MCPExecutor {
         }
     }
 
-    // --- HELPER: Resolve Absolute Path for Windows ---
     private normalizeCommand(fullCommand: string): string {
-        // Split "cmd" from "args" (e.g. ".venv/bin/python" and "-m notion_mcp")
-        const [binary = '', ...args] = fullCommand.split(' ');
+        let cmd = fullCommand;
 
-        if (process.platform === 'win32') {
-            console.log('[Executor] Applying Windows path fixes...');
+        // 1. "UV RUN" INTERCEPTOR
+        if (cmd.startsWith('uv run ')) {
+            const scriptArgs = cmd.substring(7);
+            const venvPython = process.platform === 'win32'
+                ? path.join(this.cwd, '.venv', 'Scripts', 'python.exe')
+                : path.join(this.cwd, '.venv', 'bin', 'python');
 
-            let safeBinary = binary;
-
-            // 1. Fix Slashes
-            safeBinary = safeBinary.replace(/\//g, '\\');
-
-            // 2. Fix venv path mapping (bin -> Scripts)
-            if (safeBinary.includes('.venv\\bin\\python')) {
-                safeBinary = safeBinary.replace('.venv\\bin\\python', '.venv\\Scripts\\python.exe');
+            if (fs.existsSync(venvPython)) {
+                console.log('[Executor] ⚡ Optimizing: Replaced "uv run" with venv python');
+                // Quote the executable path to handle spaces in folder names
+                cmd = `"${venvPython}" ${scriptArgs}`;
             }
-
-            // 3. FORCE ABSOLUTE PATH
-            // If it looks like a relative path inside the tool dir, make it absolute.
-            if (safeBinary.startsWith('.venv') || safeBinary.startsWith('node')) {
-                // If it starts with .venv, resolve it against cwd
-                if (safeBinary.startsWith('.venv')) {
-                    safeBinary = path.resolve(this.cwd, safeBinary);
-                }
-                // (Optional) If it is 'node', we usually leave it to system PATH, 
-                // but for venv python, we must be specific.
-            }
-
-            // Reassemble
-            return `${safeBinary} ${args.join(' ')}`;
         }
 
-        return fullCommand;
+        // 2. WINDOWS PATH FIXES
+        if (process.platform === 'win32') {
+            cmd = cmd.replace(/\//g, '\\');
+            if (cmd.includes('.venv\\bin\\python')) {
+                cmd = cmd.replace('.venv\\bin\\python', '.venv\\Scripts\\python.exe');
+            }
+        }
+
+        return cmd;
     }
-    // ------------------------------------------------
 
     private startServer() {
-        // 1. Normalize
         const safeCommand = this.normalizeCommand(this.startCommand);
         console.log(`[Executor] Booting: ${safeCommand}`);
 
-        // 2. Split again for spawn
-        // We need to respect spaces in paths if we had them, but for now simple split is fine
-        // because our auto-generated paths don't have spaces.
-        let newPath = process.env.PATH;
+        const shellCmd = safeCommand;
 
-        if (this.startCommand.includes('.venv')) {
+        // 1. Calculate PATH (prepend venv)
+        let newPath = process.env.PATH;
+        if (this.cwd) {
             const venvBin = process.platform === 'win32'
                 ? path.resolve(this.cwd, '.venv', 'Scripts')
                 : path.resolve(this.cwd, '.venv', 'bin');
-
-            // Prepend to PATH (Windows uses ';', Linux uses ':')
             const delimiter = process.platform === 'win32' ? ';' : ':';
             newPath = `${venvBin}${delimiter}${process.env.PATH}`;
         }
 
-        const [cmd, ...args] = safeCommand.split(' ');
-
-        if (!cmd) {
-            throw new Error(`Invalid start command: ${this.startCommand}`);
-        }
-
-        this.process = spawn(cmd, args, {
+        // 2. Spawn Process
+        this.process = spawn(shellCmd, [], {
             cwd: this.cwd,
-            // Use the enhanced PATH
-            env: { ...process.env, ...this.env, PATH: newPath },
+            env: {
+                ...process.env,
+                ...this.env,
+                PATH: newPath,
+                PYTHONUNBUFFERED: '1',
+                // CRITICAL FIX: Ensure imports work from the root directory
+                PYTHONPATH: this.cwd
+            },
             shell: true
         });
 
+        // 3. Log Output
         this.process?.stderr?.on('data', (data) => console.error(`[Tool Log] ${data}`));
 
-        setTimeout(() => this.kill(), 60000);
+        // Safety Timeout (60s)
+        setTimeout(() => {
+            if (this.process) {
+                console.log('[Executor] ⚠️ Safety Timeout reached. Killing process.');
+                this.kill();
+            }
+        }, 60000);
     }
 
     private performHandshake(): Promise<void> {
@@ -116,6 +112,15 @@ export class MCPExecutor {
             if (!this.process || !this.process.stdin || !this.process.stdout) {
                 return reject(new Error('Process not started'));
             }
+
+            // --- CRITICAL FIX: Detect Early Exit ---
+            // If the process crashes immediately (e.g. Import Error), reject the promise.
+            this.process.on('close', (code) => {
+                if (!this.isInitialized) {
+                    reject(new Error(`Server exited early with code ${code}. Check logs above.`));
+                }
+            });
+            // ---------------------------------------
 
             const initRequest = JSON.stringify({
                 jsonrpc: "2.0", id: 0, method: "initialize",

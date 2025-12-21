@@ -12,6 +12,48 @@ const supabase = createClient(
     process.env.SUPABASE_SERVICE_ROLE_KEY!
 );
 
+// --- HELPER: Find a Stable Python Path (Resolves to absolute executable) ---
+async function findStablePythonPath(): Promise<string> {
+    console.log('[Provisioner] Scanning for stable Python (3.10 - 3.12)...');
+
+    // Commands to test
+    const candidates = process.platform === 'win32'
+        ? [
+            ['py', '-3.12'], ['py', '-3.11'], ['py', '-3.10'], // Windows Launcher
+            ['python3.12'], ['python3.11'], ['python']         // Direct PATH
+        ]
+        : [['python3.12'], ['python3.11'], ['python3'], ['python']];
+
+    for (const cmd of candidates) {
+        const pythonBinary = cmd[0];
+        if (!pythonBinary) continue;
+
+        try {
+            // 1. Check version string
+            const versionCheck = await execa(pythonBinary, [...cmd.slice(1), '--version']);
+            const versionStr = versionCheck.stdout.trim(); // e.g., "Python 3.12.8"
+
+            if (versionStr.includes(' 3.14') || versionStr.includes(' 3.13')) {
+                console.log(`   Skipping ${cmd.join(' ')} (${versionStr}) - Too new/unstable.`);
+                continue;
+            }
+
+            // 2. Resolve ABSOLUTE path
+            // We ask Python to tell us where it lives. This is critical for 'uv'.
+            const pathCheck = await execa(pythonBinary, [...cmd.slice(1), '-c', 'import sys; print(sys.executable)']);
+            const absPath = pathCheck.stdout.trim();
+
+            console.log(`   ✅ Selected: ${absPath} (${versionStr})`);
+            return absPath;
+        } catch (e) {
+            // Command not found, continue
+        }
+    }
+
+    console.warn('   ⚠️ No specific stable python found. Falling back to system "python".');
+    return 'python'; // Hope for the best
+}
+
 export async function prepareTool(toolId: string, bundlePath: string): Promise<string> {
     const runtimeCache = path.resolve('runtime_cache');
     const toolDir = path.join(runtimeCache, toolId);
@@ -31,16 +73,13 @@ export async function prepareTool(toolId: string, bundlePath: string): Promise<s
     if (fs.existsSync(toolDir)) await fs.remove(toolDir);
     await fs.ensureDir(toolDir);
 
-    // 2. DOWNLOAD from Supabase Storage
+    // 2. DOWNLOAD
     console.log(`[Provisioner] Downloading bundle: ${bundlePath}...`);
-
     const { data, error } = await supabase.storage
         .from('tool-bundles')
         .download(bundlePath);
 
-    if (error || !data) {
-        throw new Error(`Failed to download bundle: ${error?.message}`);
-    }
+    if (error || !data) throw new Error(`Failed to download bundle: ${error?.message}`);
 
     // 3. UNZIP
     console.log(`[Provisioner] Extracting...`);
@@ -48,8 +87,8 @@ export async function prepareTool(toolId: string, bundlePath: string): Promise<s
     const zip = new AdmZip(buffer);
     zip.extractAllTo(toolDir, true);
 
-    // 4. DETECT & INSTALL DEPENDENCIES
-    console.log(`[Provisioner] Installing dependencies for ${toolId}...`);
+    // 4. DETECT & INSTALL
+    console.log(`[Provisioner] Installing dependencies...`);
 
     const isNode = fs.existsSync(path.join(toolDir, 'package.json'));
     const isPython = fs.existsSync(path.join(toolDir, 'pyproject.toml')) ||
@@ -57,14 +96,12 @@ export async function prepareTool(toolId: string, bundlePath: string): Promise<s
 
     if (isNode) {
         console.log('   -> Node.js detected.');
-
         if (fs.existsSync(path.join(toolDir, 'pnpm-lock.yaml'))) {
             try { await execa('npm', ['install', '-g', 'pnpm'], { stdio: 'ignore' }); } catch (e) { }
             await execa('pnpm', ['install'], { cwd: toolDir });
         } else {
             await execa('npm', ['install', '--omit=dev'], { cwd: toolDir });
         }
-
         if (fs.existsSync(path.join(toolDir, 'tsconfig.json'))) {
             try { await execa('npm', ['run', 'build'], { cwd: toolDir }); } catch (e) { }
         }
@@ -72,39 +109,44 @@ export async function prepareTool(toolId: string, bundlePath: string): Promise<s
     } else if (isPython) {
         console.log('   -> Python detected.');
 
-        // WIN32 FIX 1: Use 'python' alias for creation
-        const sysPython = process.platform === 'win32' ? 'python' : 'python3';
+        // ROBUSTNESS: Get Absolute Path to Stable Python
+        const pythonExe = await findStablePythonPath();
 
         console.log('      Creating venv...');
-        await execa(sysPython, ['-m', 'venv', '.venv'], { cwd: toolDir });
+        // Create venv explicitly using the stable python
+        await execa(pythonExe, ['-m', 'venv', '.venv'], { cwd: toolDir });
 
-        // WIN32 FIX 2: Calculate VENV PYTHON path
-        // We use this to run pip safely (python -m pip)
+        // Calculate Venv Paths
         const venvPython = process.platform === 'win32'
             ? path.join(toolDir, '.venv', 'Scripts', 'python.exe')
             : path.join(toolDir, '.venv', 'bin', 'python');
 
-        // Calculate PIP path (for direct calls if needed later)
-        const venvPip = process.platform === 'win32'
-            ? path.join(toolDir, '.venv', 'Scripts', 'pip.exe')
-            : path.join(toolDir, '.venv', 'bin', 'pip');
-
         try {
-            console.log('      Installing pip requirements...');
-
-            // CRITICAL FIX: Upgrade pip using python executable, NOT pip executable
-            // "python -m pip install --upgrade pip" avoids file locking issues on Windows
+            console.log('      Installing dependencies (via pip/uv)...');
+            // Upgrade pip
             await execa(venvPython, ['-m', 'pip', 'install', '--upgrade', 'pip'], { cwd: toolDir });
 
+            // Install 'uv' inside venv
+            await execa(venvPython, ['-m', 'pip', 'install', 'uv'], { cwd: toolDir });
+
+            // INSTALLATION LOGIC
             if (fs.existsSync(path.join(toolDir, 'uv.lock'))) {
-                await execa(venvPython, ['-m', 'pip', 'install', 'uv'], { cwd: toolDir });
-                await execa(venvPip.replace('pip', 'uv'), ['sync'], { cwd: toolDir });
-            } else {
-                // Install "." using python -m pip for consistency
+                const venvUv = process.platform === 'win32'
+                    ? path.join(toolDir, '.venv', 'Scripts', 'uv.exe')
+                    : path.join(toolDir, '.venv', 'bin', 'uv');
+
+                // CRITICAL FIX: Pass --python flag to force uv to use our stable version
+                // This prevents it from deleting our venv and using System Python 3.14
+                console.log(`      Running uv sync with python: ${pythonExe}`);
+                await execa(venvUv, ['sync', '--python', pythonExe], { cwd: toolDir });
+
+            } else if (fs.existsSync(path.join(toolDir, 'pyproject.toml'))) {
                 await execa(venvPython, ['-m', 'pip', 'install', '.'], { cwd: toolDir });
+            } else if (fs.existsSync(path.join(toolDir, 'requirements.txt'))) {
+                await execa(venvPython, ['-m', 'pip', 'install', '-r', 'requirements.txt'], { cwd: toolDir });
             }
         } catch (error: any) {
-            console.error('Pip Install Failed:', error.stderr || error.message);
+            console.error('Dependency Install Failed:', error.stderr || error.message);
             throw error;
         }
     } else {

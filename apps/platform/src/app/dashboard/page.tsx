@@ -3,8 +3,8 @@
 import React, { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { User } from '@supabase/supabase-js';
-import { 
-    Plus, Server, Activity, Loader2, Eye 
+import {
+    Plus, Server, Activity, Loader2, Eye, Key, Copy, Check, Terminal
 } from 'lucide-react';
 import { createClient } from '../../../utils/supabase/client';
 import Header from '../components/Header';
@@ -25,9 +25,11 @@ export default function Dashboard() {
     const supabase = createClient();
     const [user, setUser] = useState<User | null>(null);
     const [servers, setServers] = useState<Tool[]>([]);
+    const [apiKey, setApiKey] = useState<string | null>(null);
     const [loading, setLoading] = useState(true);
     const [selectedManifest, setSelectedManifest] = useState<any | null>(null);
     const [isModalOpen, setIsModalOpen] = useState(false);
+    const [copied, setCopied] = useState(false);
 
     // Auth & Data Fetching
     useEffect(() => {
@@ -39,30 +41,67 @@ export default function Dashboard() {
             }
             setUser(user);
 
-            // Fetch Servers
-            const { data, error: dbError } = await supabase
+            // 1. Fetch Servers
+            const { data: toolsData } = await supabase
                 .from('tools')
                 .select('*')
                 .eq('user_id', user.id)
                 .order('created_at', { ascending: false });
 
-            if (!dbError && data) {
-                setServers(data as Tool[]);
-            }
+            if (toolsData) setServers(toolsData as Tool[]);
+
+            // 2. Fetch API Key
+            const { data: keyData } = await supabase
+                .from('api_keys')
+                .select('key_hash')
+                .eq('user_id', user.id)
+                .single();
+
+            if (keyData) setApiKey(keyData.key_hash);
+
             setLoading(false);
         };
         init();
     }, [router, supabase]);
 
-    // Updated Logout Handler
     const handleLogout = async () => {
         await supabase.auth.signOut();
-        router.push('/'); // Redirects to Home Page
+        router.push('/');
     };
 
     const openToolsModal = (manifest: any) => {
         setSelectedManifest(manifest);
         setIsModalOpen(true);
+    };
+
+    // --- LOCAL STDIO CONFIG GENERATOR ---
+    const getClientConfig = () => {
+        if (!apiKey) return 'Generating key...';
+
+        // This configuration tells Cursor/Claude to run your Gateway locally via Stdio.
+        // Users must update the path to point to their actual local file.
+        return JSON.stringify({
+            "mcpServers": {
+                "mcp-sentry-local": {
+                    "command": "npx",
+                    "args": [
+                        "-y",
+                        "tsx",
+                        "path/to/mcp-sentry/apps/gateway/src/index.ts"
+                    ],
+                    "env": {
+                        "MCP_API_KEY": apiKey,
+                        "PORT": "8000"
+                    }
+                }
+            }
+        }, null, 2);
+    };
+
+    const copyToClipboard = () => {
+        navigator.clipboard.writeText(getClientConfig());
+        setCopied(true);
+        setTimeout(() => setCopied(false), 2000);
     };
 
     const getStatusColor = (status: string) => {
@@ -96,7 +135,8 @@ export default function Dashboard() {
             <Header />
 
             <div className="flex-1 max-w-7xl mx-auto px-6 py-12 w-full">
-                {/* Page Header */}
+
+                {/* --- HEADER --- */}
                 <div className="flex flex-col md:flex-row justify-between items-start md:items-center mb-8 gap-4">
                     <div>
                         <h1 className="text-3xl font-bold mb-2">My Servers</h1>
@@ -111,7 +151,42 @@ export default function Dashboard() {
                     </button>
                 </div>
 
-                {/* Empty State */}
+                {/* --- LOCAL CONNECT SECTION --- */}
+                {apiKey && (
+                    <div className="mb-10 bg-gray-900/50 border border-emerald-500/20 rounded-xl p-6 relative overflow-hidden">
+                        <div className="absolute top-0 left-0 w-1 h-full bg-emerald-500"></div>
+                        <div className="flex flex-col md:flex-row gap-6">
+                            <div className="flex-1">
+                                <h3 className="text-lg font-bold text-white flex items-center gap-2 mb-2">
+                                    <Terminal className="w-5 h-5 text-emerald-500" />
+                                    Local Client Configuration
+                                </h3>
+                                <p className="text-gray-400 text-sm mb-4 leading-relaxed">
+                                    Use this configuration to test your Gateway locally.
+                                    <br />
+                                    <span className="text-yellow-500">Important:</span> Update the path in <code>args</code> to match your local file system location.
+                                </p>
+                            </div>
+
+                            <div className="flex-1 w-full max-w-xl">
+                                <div className="relative group">
+                                    <pre className="bg-black/80 p-4 rounded-lg border border-gray-800 text-sm text-gray-300 overflow-x-auto font-mono scrollbar-thin scrollbar-thumb-gray-700">
+                                        {getClientConfig()}
+                                    </pre>
+                                    <button
+                                        onClick={copyToClipboard}
+                                        className="absolute top-2 right-2 p-2 bg-gray-800 hover:bg-gray-700 rounded-md transition-colors text-white border border-gray-700"
+                                        title="Copy to clipboard"
+                                    >
+                                        {copied ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                )}
+
+                {/* --- SERVERS LIST --- */}
                 {servers.length === 0 ? (
                     <div className="border border-dashed border-gray-800 rounded-2xl p-12 text-center bg-gray-900/50">
                         <div className="w-16 h-16 bg-gray-800 rounded-full flex items-center justify-center mx-auto mb-4">
@@ -127,15 +202,12 @@ export default function Dashboard() {
                         </button>
                     </div>
                 ) : (
-                    /* Server Grid */
                     <div className="grid grid-cols-1 gap-4">
                         {servers.map((server) => {
                             const toolCount = server.manifest?.tools?.length || 0;
-                            
                             return (
                                 <div key={server.id} className="bg-gray-900 border border-gray-800 rounded-xl p-6 transition-all hover:border-gray-700">
                                     <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-6">
-                                        
                                         {/* Left: Info */}
                                         <div className="flex-1 min-w-0">
                                             <div className="flex items-center gap-3 mb-2">
@@ -146,7 +218,6 @@ export default function Dashboard() {
                                                     {server.status}
                                                 </span>
                                             </div>
-                                            
                                             <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-sm text-gray-400">
                                                 <div className="flex items-center gap-1.5">
                                                     <Activity className="w-4 h-4" />
@@ -161,9 +232,7 @@ export default function Dashboard() {
                                                 <div className="text-2xl font-bold text-white">{toolCount}</div>
                                                 <div className="text-xs text-gray-500 uppercase font-semibold">Tools</div>
                                             </div>
-
                                             <div className="h-8 w-px bg-gray-800 hidden lg:block"></div>
-
                                             <button
                                                 onClick={() => openToolsModal(server.manifest)}
                                                 disabled={!server.manifest}
@@ -183,10 +252,10 @@ export default function Dashboard() {
 
             <Footer />
 
-            <ToolsModal 
-                isOpen={isModalOpen} 
-                onClose={() => setIsModalOpen(false)} 
-                manifest={selectedManifest} 
+            <ToolsModal
+                isOpen={isModalOpen}
+                onClose={() => setIsModalOpen(false)}
+                manifest={selectedManifest}
             />
         </div>
     );
