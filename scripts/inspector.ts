@@ -180,6 +180,27 @@ function fetchToolsFromRunningServer(command: string, cwd: string, env: NodeJS.P
 
         let buffer = '';
         let isInitialized = false;
+        let stderrLog = ''; // Capture errors to report why it crashed
+
+        // --- ROBUSTNESS: Handle Early Exit ---
+        serverProcess.on('error', (err) => {
+            reject(new Error(`Failed to spawn process: ${err.message}`));
+        });
+
+        serverProcess.on('exit', (code) => {
+            if (!isInitialized) {
+                reject(new Error(`Server exited early (code ${code}). Logs:\n${stderrLog}`));
+            }
+        });
+
+        // --- ROBUSTNESS: Handle Broken Pipes on Stdin ---
+        serverProcess.stdin.on('error', (err) => {
+            // This ignores the EPIPE error specifically, preventing the crash.
+            // We rely on the 'exit' handler above to report the actual failure.
+            if ((err as any).code !== 'EPIPE') {
+                console.error('[Inspector] Stdin Error:', err);
+            }
+        });
 
         serverProcess.stdout.on('data', (data) => {
             const chunk = data.toString();
@@ -197,10 +218,10 @@ function fetchToolsFromRunningServer(command: string, cwd: string, env: NodeJS.P
                     // Step 2: Receive Initialize Result
                     if (json.id === 0 && json.result) {
                         const initNotification = JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) + "\n";
-                        serverProcess.stdin.write(initNotification);
+                        if (!serverProcess.stdin.destroyed) serverProcess.stdin.write(initNotification);
 
                         const toolsRequest = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }) + "\n";
-                        serverProcess.stdin.write(toolsRequest);
+                        if (!serverProcess.stdin.destroyed) serverProcess.stdin.write(toolsRequest);
                         isInitialized = true;
                     }
 
@@ -218,7 +239,11 @@ function fetchToolsFromRunningServer(command: string, cwd: string, env: NodeJS.P
             }
         });
 
-        serverProcess.stderr.on('data', (data) => console.error(`[Server stderr] ${data}`));
+        serverProcess.stderr.on('data', (data) => {
+            const log = data.toString();
+            stderrLog += log;
+            console.error(`[Server stderr] ${log}`);
+        });
 
         // Step 1: Send Initialize Request
         const initRequest = JSON.stringify({
@@ -226,7 +251,10 @@ function fetchToolsFromRunningServer(command: string, cwd: string, env: NodeJS.P
             params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "inspector", version: "1.0" } }
         }) + "\n";
 
-        serverProcess.stdin.write(initRequest);
+        // Write safely
+        if (!serverProcess.stdin.destroyed) {
+            serverProcess.stdin.write(initRequest);
+        }
 
         setTimeout(() => {
             if (!isInitialized) {
