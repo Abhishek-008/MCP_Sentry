@@ -4,7 +4,7 @@ import React, { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { User } from '@supabase/supabase-js';
 import {
-    Plus, Server, Activity, Loader2, Eye, Key, Copy, Check, Terminal, Globe, Lock
+    Plus, Server, Activity, Loader2, Eye, Key, Copy, Check, Terminal, Globe, Lock, Users
 } from 'lucide-react';
 import { createClient } from '../../../utils/supabase/client';
 import Header from '../components/Header';
@@ -18,7 +18,8 @@ interface Tool {
     deployment_url: string | null;
     manifest: any;
     created_at: string;
-    is_public: boolean; // <--- ADDED
+    is_public: boolean;
+    user_id: string; // Needed to check ownership
 }
 
 export default function Dashboard() {
@@ -41,16 +42,17 @@ export default function Dashboard() {
         }
         setUser(user);
 
-        // Fetch Servers
+        // 1. Fetch Tools (Mine OR Public)
         const { data: toolsData } = await supabase
             .from('tools')
             .select('*')
-            .eq('user_id', user.id)
+            // This is the magic line: Show MY tools OR PUBLIC tools
+            .or(`user_id.eq.${user.id},is_public.eq.true`)
             .order('created_at', { ascending: false });
 
         if (toolsData) setServers(toolsData as Tool[]);
 
-        // Fetch API Key
+        // 2. Fetch API Key
         const { data: keyData } = await supabase
             .from('api_keys')
             .select('key_hash')
@@ -66,26 +68,26 @@ export default function Dashboard() {
     }, [router, supabase]);
 
     // --- TOGGLE PUBLIC/PRIVATE ---
-    const toggleVisibility = async (toolId: string, currentStatus: boolean) => {
+    const toggleVisibility = async (tool: Tool) => {
+        // Security Check: Only Owner can toggle
+        if (tool.user_id !== user?.id) return;
+
+        const currentStatus = tool.is_public;
+
         // Optimistic UI update
-        setServers(prev => prev.map(s => s.id === toolId ? { ...s, is_public: !currentStatus } : s));
+        setServers(prev => prev.map(s => s.id === tool.id ? { ...s, is_public: !currentStatus } : s));
 
         const { error } = await supabase
             .from('tools')
             .update({ is_public: !currentStatus })
-            .eq('id', toolId);
+            .eq('id', tool.id)
+            .eq('user_id', user.id); // Double check ownership in DB
 
         if (error) {
             console.error('Update failed:', error);
-            // Revert on error
-            setServers(prev => prev.map(s => s.id === toolId ? { ...s, is_public: currentStatus } : s));
+            setServers(prev => prev.map(s => s.id === tool.id ? { ...s, is_public: currentStatus } : s));
             alert('Failed to update visibility');
         }
-    };
-
-    const handleLogout = async () => {
-        await supabase.auth.signOut();
-        router.push('/');
     };
 
     const openToolsModal = (manifest: any) => {
@@ -153,8 +155,8 @@ export default function Dashboard() {
 
                 <div className="flex flex-col md:flex-row justify-between items-start md:items-center mb-8 gap-4">
                     <div>
-                        <h1 className="text-3xl font-bold mb-2">My Servers</h1>
-                        <p className="text-gray-400">Manage your deployed MCP agents</p>
+                        <h1 className="text-3xl font-bold mb-2">My Dashboard</h1>
+                        <p className="text-gray-400">Manage your agents and explore community tools</p>
                     </div>
                     <button
                         onClick={() => router.push('/deploy')}
@@ -165,7 +167,7 @@ export default function Dashboard() {
                     </button>
                 </div>
 
-                {/* --- CONFIG SECTION (Hidden if no key) --- */}
+                {/* --- CONFIG SECTION --- */}
                 {apiKey && (
                     <div className="mb-10 bg-gray-900/50 border border-emerald-500/20 rounded-xl p-6 relative overflow-hidden">
                         <div className="absolute top-0 left-0 w-1 h-full bg-emerald-500"></div>
@@ -173,10 +175,11 @@ export default function Dashboard() {
                             <div className="flex-1">
                                 <h3 className="text-lg font-bold text-white flex items-center gap-2 mb-2">
                                     <Terminal className="w-5 h-5 text-emerald-500" />
-                                    Local Client Configuration
+                                    Client Configuration
                                 </h3>
                                 <p className="text-gray-400 text-sm mb-4 leading-relaxed">
-                                    Use this configuration to test your Gateway locally.
+                                    Use this configuration to connect Cursor or Claude to your account.
+                                    This gives you access to <b>all your deployed tools</b> plus any <b>public community tools</b>.
                                 </p>
                             </div>
                             <div className="flex-1 w-full max-w-xl">
@@ -203,20 +206,22 @@ export default function Dashboard() {
                         <div className="w-16 h-16 bg-gray-800 rounded-full flex items-center justify-center mx-auto mb-4">
                             <Server className="w-8 h-8 text-gray-600" />
                         </div>
-                        <h3 className="text-xl font-semibold mb-2">No servers deployed yet</h3>
+                        <h3 className="text-xl font-semibold mb-2">No servers found</h3>
                         <button
                             onClick={() => router.push('/deploy')}
                             className="text-emerald-400 hover:text-emerald-300 font-medium"
                         >
-                            Start Deployment →
+                            Deploy the first one →
                         </button>
                     </div>
                 ) : (
                     <div className="grid grid-cols-1 gap-4">
                         {servers.map((server) => {
+                            const isOwner = server.user_id === user?.id;
                             const toolCount = server.manifest?.tools?.length || 0;
+
                             return (
-                                <div key={server.id} className="bg-gray-900 border border-gray-800 rounded-xl p-6 transition-all hover:border-gray-700">
+                                <div key={server.id} className={`bg-gray-900 border rounded-xl p-6 transition-all hover:border-gray-700 ${isOwner ? 'border-gray-800' : 'border-blue-900/30 bg-blue-900/5'}`}>
                                     <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-6">
 
                                         {/* Left: Info */}
@@ -225,11 +230,19 @@ export default function Dashboard() {
                                                 <h3 className="text-xl font-bold truncate text-white">
                                                     {getRepoName(server.repo_url)}
                                                 </h3>
-                                                <span className={`px-2.5 py-0.5 rounded-full text-xs font-medium border ${getStatusColor(server.status)} uppercase tracking-wide`}>
-                                                    {server.status}
-                                                </span>
 
-                                                {/* VISIBILITY BADGE */}
+                                                {/* OWNER / COMMUNITY BADGES */}
+                                                {isOwner ? (
+                                                    <span className={`px-2.5 py-0.5 rounded-full text-xs font-medium border ${getStatusColor(server.status)} uppercase tracking-wide`}>
+                                                        {server.status}
+                                                    </span>
+                                                ) : (
+                                                    <span className="px-2.5 py-0.5 rounded-full text-xs font-medium border border-blue-500/30 bg-blue-500/10 text-blue-400 uppercase tracking-wide flex items-center gap-1">
+                                                        <Users className="w-3 h-3" /> Community
+                                                    </span>
+                                                )}
+
+                                                {/* PUBLIC BADGE */}
                                                 {server.is_public && (
                                                     <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-purple-500/10 text-purple-400 border border-purple-500/20 uppercase tracking-wide flex items-center gap-1">
                                                         <Globe className="w-3 h-3" /> Public
@@ -247,23 +260,31 @@ export default function Dashboard() {
                                         {/* Right: Actions */}
                                         <div className="flex items-center gap-4 lg:border-l lg:border-gray-800 lg:pl-6">
 
-                                            {/* VISIBILITY TOGGLE */}
-                                            <button
-                                                onClick={() => toggleVisibility(server.id, server.is_public)}
-                                                className={`p-2 rounded-lg transition-colors border ${server.is_public
-                                                        ? 'bg-purple-900/20 border-purple-500/30 text-purple-400 hover:bg-purple-900/40'
-                                                        : 'bg-gray-800 border-gray-700 text-gray-400 hover:text-white hover:bg-gray-700'
-                                                    }`}
-                                                title={server.is_public ? "Make Private" : "Make Public"}
-                                            >
-                                                {server.is_public ? <Globe className="w-5 h-5" /> : <Lock className="w-5 h-5" />}
-                                            </button>
+                                            {/* VISIBILITY TOGGLE (Restricted to Owner) */}
+                                            {isOwner ? (
+                                                <button
+                                                    onClick={() => toggleVisibility(server)}
+                                                    className={`p-2 rounded-lg transition-colors border ${server.is_public
+                                                            ? 'bg-purple-900/20 border-purple-500/30 text-purple-400 hover:bg-purple-900/40'
+                                                            : 'bg-gray-800 border-gray-700 text-gray-400 hover:text-white hover:bg-gray-700'
+                                                        }`}
+                                                    title={server.is_public ? "Make Private" : "Make Public"}
+                                                >
+                                                    {server.is_public ? <Globe className="w-5 h-5" /> : <Lock className="w-5 h-5" />}
+                                                </button>
+                                            ) : (
+                                                <div className="p-2 opacity-50 cursor-not-allowed" title="Owned by another user">
+                                                    <Lock className="w-5 h-5 text-gray-600" />
+                                                </div>
+                                            )}
 
                                             <div className="text-center px-2">
                                                 <div className="text-2xl font-bold text-white">{toolCount}</div>
                                                 <div className="text-xs text-gray-500 uppercase font-semibold">Tools</div>
                                             </div>
                                             <div className="h-8 w-px bg-gray-800 hidden lg:block"></div>
+
+                                            {/* VIEW BUTTON (Available to Everyone) */}
                                             <button
                                                 onClick={() => openToolsModal(server.manifest)}
                                                 disabled={!server.manifest}
