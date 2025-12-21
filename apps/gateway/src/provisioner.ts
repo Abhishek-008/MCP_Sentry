@@ -83,7 +83,7 @@ export async function prepareTool(toolId: string, bundlePath: string): Promise<s
     const supabase = getSupabase(); // <--- SAFE INITIALIZATION
 
     const { data, error } = await supabase.storage
-        .from('tool_bundles') // Ensure this matches your bucket name (tool-bundles vs tool_bundles)
+        .from('tool-bundles') // Ensure this matches your bucket name (tool-bundles vs tool_bundles)
         .download(bundlePath);
 
     if (error || !data) throw new Error(`Failed to download bundle: ${error?.message}`);
