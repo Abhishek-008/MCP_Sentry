@@ -86,7 +86,7 @@ app.get('/api/tools', requireApiKey, async (req: AuthRequest, res: Response): Pr
             .from('tools')
             .select('id, manifest')
             .eq('status', 'active')
-            .eq('user_id', userId); // <--- CRITICAL: User Isolation
+            .or(`user_id.eq.${userId},is_public.eq.true`);
 
         if (error) throw error;
 
@@ -127,7 +127,7 @@ app.post('/api/execute', requireApiKey, async (req: AuthRequest, res: Response):
             .from('tools')
             .select('*')
             .eq('id', toolId)
-            .eq('user_id', userId) // <--- CRITICAL: Prevent using others' tools
+            .or(`user_id.eq.${userId},is_public.eq.true`)
             .single();
 
         if (!tool) {

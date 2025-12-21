@@ -4,7 +4,7 @@ import React, { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { User } from '@supabase/supabase-js';
 import {
-    Plus, Server, Activity, Loader2, Eye, Key, Copy, Check, Terminal
+    Plus, Server, Activity, Loader2, Eye, Key, Copy, Check, Terminal, Globe, Lock
 } from 'lucide-react';
 import { createClient } from '../../../utils/supabase/client';
 import Header from '../components/Header';
@@ -18,6 +18,7 @@ interface Tool {
     deployment_url: string | null;
     manifest: any;
     created_at: string;
+    is_public: boolean; // <--- ADDED
 }
 
 export default function Dashboard() {
@@ -31,38 +32,56 @@ export default function Dashboard() {
     const [isModalOpen, setIsModalOpen] = useState(false);
     const [copied, setCopied] = useState(false);
 
-    // Auth & Data Fetching
+    // Fetch Data
+    const fetchData = async () => {
+        const { data: { user }, error } = await supabase.auth.getUser();
+        if (error || !user) {
+            router.push('/login');
+            return;
+        }
+        setUser(user);
+
+        // Fetch Servers
+        const { data: toolsData } = await supabase
+            .from('tools')
+            .select('*')
+            .eq('user_id', user.id)
+            .order('created_at', { ascending: false });
+
+        if (toolsData) setServers(toolsData as Tool[]);
+
+        // Fetch API Key
+        const { data: keyData } = await supabase
+            .from('api_keys')
+            .select('key_hash')
+            .eq('user_id', user.id)
+            .single();
+
+        if (keyData) setApiKey(keyData.key_hash);
+        setLoading(false);
+    };
+
     useEffect(() => {
-        const init = async () => {
-            const { data: { user }, error } = await supabase.auth.getUser();
-            if (error || !user) {
-                router.push('/login');
-                return;
-            }
-            setUser(user);
-
-            // 1. Fetch Servers
-            const { data: toolsData } = await supabase
-                .from('tools')
-                .select('*')
-                .eq('user_id', user.id)
-                .order('created_at', { ascending: false });
-
-            if (toolsData) setServers(toolsData as Tool[]);
-
-            // 2. Fetch API Key
-            const { data: keyData } = await supabase
-                .from('api_keys')
-                .select('key_hash')
-                .eq('user_id', user.id)
-                .single();
-
-            if (keyData) setApiKey(keyData.key_hash);
-
-            setLoading(false);
-        };
-        init();
+        fetchData();
     }, [router, supabase]);
+
+    // --- TOGGLE PUBLIC/PRIVATE ---
+    const toggleVisibility = async (toolId: string, currentStatus: boolean) => {
+        // Optimistic UI update
+        setServers(prev => prev.map(s => s.id === toolId ? { ...s, is_public: !currentStatus } : s));
+
+        const { error } = await supabase
+            .from('tools')
+            .update({ is_public: !currentStatus })
+            .eq('id', toolId);
+
+        if (error) {
+            console.error('Update failed:', error);
+            // Revert on error
+            setServers(prev => prev.map(s => s.id === toolId ? { ...s, is_public: currentStatus } : s));
+            alert('Failed to update visibility');
+        }
+    };
 
     const handleLogout = async () => {
         await supabase.auth.signOut();
@@ -74,12 +93,8 @@ export default function Dashboard() {
         setIsModalOpen(true);
     };
 
-    // --- LOCAL STDIO CONFIG GENERATOR ---
     const getClientConfig = () => {
         if (!apiKey) return 'Generating key...';
-
-        // This configuration tells Cursor/Claude to run your Gateway locally via Stdio.
-        // Users must update the path to point to their actual local file.
         return JSON.stringify({
             "mcpServers": {
                 "mcp-sentry-local": {
@@ -87,7 +102,7 @@ export default function Dashboard() {
                     "args": [
                         "-y",
                         "tsx",
-                        "path/to/mcp-sentry/apps/gateway/src/index.ts"
+                        "path/to/mcp-sentry/packages/bridge/index.ts"
                     ],
                     "env": {
                         "MCP_API_KEY": apiKey,
@@ -136,7 +151,6 @@ export default function Dashboard() {
 
             <div className="flex-1 max-w-7xl mx-auto px-6 py-12 w-full">
 
-                {/* --- HEADER --- */}
                 <div className="flex flex-col md:flex-row justify-between items-start md:items-center mb-8 gap-4">
                     <div>
                         <h1 className="text-3xl font-bold mb-2">My Servers</h1>
@@ -151,7 +165,7 @@ export default function Dashboard() {
                     </button>
                 </div>
 
-                {/* --- LOCAL CONNECT SECTION --- */}
+                {/* --- CONFIG SECTION (Hidden if no key) --- */}
                 {apiKey && (
                     <div className="mb-10 bg-gray-900/50 border border-emerald-500/20 rounded-xl p-6 relative overflow-hidden">
                         <div className="absolute top-0 left-0 w-1 h-full bg-emerald-500"></div>
@@ -163,11 +177,8 @@ export default function Dashboard() {
                                 </h3>
                                 <p className="text-gray-400 text-sm mb-4 leading-relaxed">
                                     Use this configuration to test your Gateway locally.
-                                    <br />
-                                    <span className="text-yellow-500">Important:</span> Update the path in <code>args</code> to match your local file system location.
                                 </p>
                             </div>
-
                             <div className="flex-1 w-full max-w-xl">
                                 <div className="relative group">
                                     <pre className="bg-black/80 p-4 rounded-lg border border-gray-800 text-sm text-gray-300 overflow-x-auto font-mono scrollbar-thin scrollbar-thumb-gray-700">
@@ -193,7 +204,6 @@ export default function Dashboard() {
                             <Server className="w-8 h-8 text-gray-600" />
                         </div>
                         <h3 className="text-xl font-semibold mb-2">No servers deployed yet</h3>
-                        <p className="text-gray-400 mb-6">Get started by deploying your first Model Context Protocol server.</p>
                         <button
                             onClick={() => router.push('/deploy')}
                             className="text-emerald-400 hover:text-emerald-300 font-medium"
@@ -208,6 +218,7 @@ export default function Dashboard() {
                             return (
                                 <div key={server.id} className="bg-gray-900 border border-gray-800 rounded-xl p-6 transition-all hover:border-gray-700">
                                     <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-6">
+
                                         {/* Left: Info */}
                                         <div className="flex-1 min-w-0">
                                             <div className="flex items-center gap-3 mb-2">
@@ -217,6 +228,13 @@ export default function Dashboard() {
                                                 <span className={`px-2.5 py-0.5 rounded-full text-xs font-medium border ${getStatusColor(server.status)} uppercase tracking-wide`}>
                                                     {server.status}
                                                 </span>
+
+                                                {/* VISIBILITY BADGE */}
+                                                {server.is_public && (
+                                                    <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-purple-500/10 text-purple-400 border border-purple-500/20 uppercase tracking-wide flex items-center gap-1">
+                                                        <Globe className="w-3 h-3" /> Public
+                                                    </span>
+                                                )}
                                             </div>
                                             <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-sm text-gray-400">
                                                 <div className="flex items-center gap-1.5">
@@ -226,8 +244,21 @@ export default function Dashboard() {
                                             </div>
                                         </div>
 
-                                        {/* Right: Stats & Actions */}
+                                        {/* Right: Actions */}
                                         <div className="flex items-center gap-4 lg:border-l lg:border-gray-800 lg:pl-6">
+
+                                            {/* VISIBILITY TOGGLE */}
+                                            <button
+                                                onClick={() => toggleVisibility(server.id, server.is_public)}
+                                                className={`p-2 rounded-lg transition-colors border ${server.is_public
+                                                        ? 'bg-purple-900/20 border-purple-500/30 text-purple-400 hover:bg-purple-900/40'
+                                                        : 'bg-gray-800 border-gray-700 text-gray-400 hover:text-white hover:bg-gray-700'
+                                                    }`}
+                                                title={server.is_public ? "Make Private" : "Make Public"}
+                                            >
+                                                {server.is_public ? <Globe className="w-5 h-5" /> : <Lock className="w-5 h-5" />}
+                                            </button>
+
                                             <div className="text-center px-2">
                                                 <div className="text-2xl font-bold text-white">{toolCount}</div>
                                                 <div className="text-xs text-gray-500 uppercase font-semibold">Tools</div>
@@ -239,7 +270,7 @@ export default function Dashboard() {
                                                 className="flex items-center gap-2 px-4 py-2 bg-gray-800 hover:bg-gray-700 text-gray-200 rounded-lg text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                                             >
                                                 <Eye className="w-4 h-4" />
-                                                View Tools
+                                                View
                                             </button>
                                         </div>
                                     </div>
