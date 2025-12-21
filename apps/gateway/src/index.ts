@@ -1,4 +1,4 @@
-import express, { Request, Response, NextFunction } from 'express';
+import express, { type Request, type Response, type NextFunction } from 'express';
 import bodyParser from 'body-parser';
 import cors from 'cors';
 import { createClient } from '@supabase/supabase-js';
@@ -13,19 +13,25 @@ dotenv.config();
 
 const app = express();
 
-// 1. Enable CORS for everything
+// 1. CORS: Allow everything to prevent browser blocks
 app.use(cors({ origin: '*', methods: '*', allowedHeaders: '*' }));
 
-// 2. DEBUG LOGGER (See what is actually hitting the server)
+// 2. DEBUG LOGGER
 app.use((req, res, next) => {
-    console.log(`[Http] ${req.method} ${req.path}`);
+    // Only log API requests to keep logs clean
+    if (req.path.startsWith('/api') || req.path.startsWith('/sse')) {
+        console.log(`[Http] ${req.method} ${req.path}`);
+    }
     next();
 });
 
-const supabase = createClient(
-    process.env.SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_ROLE_KEY!
-);
+// 3. LAZY SUPABASE (Prevent crash if variables are missing at startup)
+const getSupabase = () => {
+    return createClient(
+        process.env.SUPABASE_URL!,
+        process.env.SUPABASE_SERVICE_ROLE_KEY!
+    );
+};
 
 const sessions = new Map<string, { transport: SSEServerTransport, server: Server }>();
 
@@ -37,15 +43,19 @@ const requireApiKey = async (req: AuthRequest, res: Response, next: NextFunction
     const apiKey = req.headers['x-api-key'] || req.query.apiKey;
     if (!apiKey || typeof apiKey !== 'string') return res.status(401).json({ error: 'Missing API Key' });
 
-    const { data: keyData } = await supabase.from('api_keys').select('user_id').eq('key_hash', apiKey).single();
-    if (!keyData) return res.status(403).json({ error: 'Invalid API Key' });
-
-    req.user = { id: keyData.user_id };
-    next();
+    try {
+        const { data: keyData } = await getSupabase().from('api_keys').select('user_id').eq('key_hash', apiKey).single();
+        if (!keyData) return res.status(403).json({ error: 'Invalid API Key' });
+        req.user = { id: keyData.user_id };
+        next();
+    } catch (err) {
+        // Fail open or closed? Closed.
+        return res.status(500).json({ error: 'Auth Check Failed' });
+    }
 };
 
 async function getSecrets(toolId: string) {
-    const { data: secrets } = await supabase.from('tool_secrets').select('key, value').eq('tool_id', toolId);
+    const { data: secrets } = await getSupabase().from('tool_secrets').select('key, value').eq('tool_id', toolId);
     const secretMap: NodeJS.ProcessEnv = {};
     if (secrets) secrets.forEach(s => secretMap[s.key] = s.value);
     return secretMap;
@@ -57,13 +67,21 @@ async function getSecrets(toolId: string) {
 app.get('/sse', requireApiKey, async (req: AuthRequest, res: Response) => {
     console.log(`[SSE] Connection Start: ${req.user!.id}`);
 
-    // CHANGE: Use /api/messages to be safe
-    const transport = new SSEServerTransport("/api/messages", res);
+    // --- CRITICAL FIX: FORCE HTTPS URL ---
+    // We calculate the absolute URL to prevent the client from guessing HTTP
+    const host = req.get('host');
+    const isLocal = host?.includes('localhost') || host?.includes('127.0.0.1');
+    const protocol = isLocal ? 'http' : 'https';
+    const endpointUrl = `${protocol}://${host}/api/messages`;
+
+    console.log(`[SSE] Advertising Endpoint: ${endpointUrl}`);
+
+    const transport = new SSEServerTransport(endpointUrl, res);
     const server = new Server({ name: "gateway", version: "1.0.0" }, { capabilities: { tools: {} } });
 
     server.setRequestHandler(ListToolsRequestSchema, async () => {
         const userId = req.user!.id;
-        const { data: tools } = await supabase.from('tools').select('*').eq('status', 'active').or(`user_id.eq.${userId},is_public.eq.true`);
+        const { data: tools } = await getSupabase().from('tools').select('*').eq('status', 'active').or(`user_id.eq.${userId},is_public.eq.true`);
 
         return {
             tools: (tools || []).map(t => {
@@ -83,7 +101,7 @@ app.get('/sse', requireApiKey, async (req: AuthRequest, res: Response) => {
         const userId = req.user!.id;
         console.log(`[SSE] Executing ${name}`);
 
-        const { data: tools } = await supabase.from('tools').select('*').eq('status', 'active').or(`user_id.eq.${userId},is_public.eq.true`);
+        const { data: tools } = await getSupabase().from('tools').select('*').eq('status', 'active').or(`user_id.eq.${userId},is_public.eq.true`);
         const foundTool = tools?.find(t => (t.manifest as any).tools.some((mt: any) => mt.name === name));
 
         if (!foundTool) throw new Error(`Tool ${name} not found`);
@@ -125,18 +143,11 @@ app.post('/api/messages', async (req: Request, res: Response) => {
     await session.transport.handlePostMessage(req, res);
 });
 
-// --- DEBUG HANDLER FOR THE "CANNOT GET" ERROR ---
+// --- DEBUG HANDLER ---
 app.get('/api/messages', (req, res) => {
-    console.error("❌ ERROR: Client sent GET to /api/messages! This implies a Redirect downgraded POST to GET.");
+    console.error("❌ ERROR: Client sent GET to /api/messages! Still seeing redirects.");
     res.status(405).send("Method Not Allowed. Please check your URL for HTTP/HTTPS mismatches.");
 });
-
-// ---------------------------------------------------------
-//  LEGACY ENDPOINTS
-// ---------------------------------------------------------
-const jsonParser = bodyParser.json();
-app.get('/api/tools', requireApiKey, async (req, res) => res.json({ tools: [] }));
-app.post('/api/execute', jsonParser, requireApiKey, async (req, res) => { /* ... */ });
 
 const PORT = process.env.PORT || 8000;
 app.listen(PORT, () => console.log(`Gateway listening on port ${PORT}`));
