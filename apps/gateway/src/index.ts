@@ -1,4 +1,4 @@
-import express, { type Request, type Response, type NextFunction } from 'express';
+import express, { Request, Response, NextFunction } from 'express';
 import bodyParser from 'body-parser';
 import cors from 'cors';
 import { createClient } from '@supabase/supabase-js';
@@ -12,9 +12,15 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprot
 dotenv.config();
 
 const app = express();
-app.use(cors());
 
-// REMOVED: app.use(bodyParser.json()); <-- This was causing the hang!
+// 1. Enable CORS for everything
+app.use(cors({ origin: '*', methods: '*', allowedHeaders: '*' }));
+
+// 2. DEBUG LOGGER (See what is actually hitting the server)
+app.use((req, res, next) => {
+    console.log(`[Http] ${req.method} ${req.path}`);
+    next();
+});
 
 const supabase = createClient(
     process.env.SUPABASE_URL!,
@@ -23,34 +29,19 @@ const supabase = createClient(
 
 const sessions = new Map<string, { transport: SSEServerTransport, server: Server }>();
 
-// --- AUTH MIDDLEWARE ---
+// --- AUTH ---
 interface AuthRequest extends Request {
     user?: { id: string };
 }
-
 const requireApiKey = async (req: AuthRequest, res: Response, next: NextFunction) => {
     const apiKey = req.headers['x-api-key'] || req.query.apiKey;
-    if (!apiKey || typeof apiKey !== 'string') {
-        console.log('[Auth] Missing Key');
-        return res.status(401).json({ error: 'Missing API Key' });
-    }
-    try {
-        const { data: keyData } = await supabase
-            .from('api_keys')
-            .select('user_id')
-            .eq('key_hash', apiKey)
-            .single();
+    if (!apiKey || typeof apiKey !== 'string') return res.status(401).json({ error: 'Missing API Key' });
 
-        if (!keyData) {
-            console.log('[Auth] Invalid Key');
-            return res.status(403).json({ error: 'Invalid API Key' });
-        }
-        req.user = { id: keyData.user_id };
-        next();
-    } catch (err) {
-        console.error('[Auth] Error:', err);
-        return res.status(500).json({ error: 'Auth Verification Failed' });
-    }
+    const { data: keyData } = await supabase.from('api_keys').select('user_id').eq('key_hash', apiKey).single();
+    if (!keyData) return res.status(403).json({ error: 'Invalid API Key' });
+
+    req.user = { id: keyData.user_id };
+    next();
 };
 
 async function getSecrets(toolId: string) {
@@ -64,62 +55,45 @@ async function getSecrets(toolId: string) {
 //  ENDPOINT 1: SSE CONNECT
 // ---------------------------------------------------------
 app.get('/sse', requireApiKey, async (req: AuthRequest, res: Response) => {
-    console.log(`[SSE] New Connection from User: ${req.user!.id}`);
-    const userId = req.user!.id;
+    console.log(`[SSE] Connection Start: ${req.user!.id}`);
 
-    const transport = new SSEServerTransport("/messages", res);
+    // CHANGE: Use /api/messages to be safe
+    const transport = new SSEServerTransport("/api/messages", res);
     const server = new Server({ name: "gateway", version: "1.0.0" }, { capabilities: { tools: {} } });
 
     server.setRequestHandler(ListToolsRequestSchema, async () => {
-        console.log(`[SSE] Client asked for Tool List (User: ${userId})`);
-        const { data: tools } = await supabase
-            .from('tools')
-            .select('id, manifest, user_id, is_public')
-            .eq('status', 'active')
-            .or(`user_id.eq.${userId},is_public.eq.true`);
+        const userId = req.user!.id;
+        const { data: tools } = await supabase.from('tools').select('*').eq('status', 'active').or(`user_id.eq.${userId},is_public.eq.true`);
 
-        const list = (tools || []).map(t => {
-            const manifest = t.manifest as any;
-            return (manifest.tools || []).map((mt: any) => ({
-                name: mt.name,
-                description: mt.description,
-                inputSchema: mt.inputSchema,
-                _toolId: t.id
-            }));
-        }).flat();
-
-        console.log(`[SSE] Returning ${list.length} tools`);
-        return { tools: list };
+        return {
+            tools: (tools || []).map(t => {
+                const manifest = t.manifest as any;
+                return (manifest.tools || []).map((mt: any) => ({
+                    name: mt.name,
+                    description: mt.description,
+                    inputSchema: mt.inputSchema,
+                    _toolId: t.id
+                }));
+            }).flat()
+        };
     });
 
     server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const { name, arguments: args } = request.params;
-        console.log(`[SSE] Client executing: ${name}`);
+        const userId = req.user!.id;
+        console.log(`[SSE] Executing ${name}`);
 
-        const { data: tools } = await supabase
-            .from('tools')
-            .select('*')
-            .eq('status', 'active')
-            .or(`user_id.eq.${userId},is_public.eq.true`);
-
-        let foundTool = null;
-        for (const t of tools || []) {
-            const manifest = t.manifest as any;
-            if (manifest.tools.find((mt: any) => mt.name === name)) {
-                foundTool = t;
-                break;
-            }
-        }
+        const { data: tools } = await supabase.from('tools').select('*').eq('status', 'active').or(`user_id.eq.${userId},is_public.eq.true`);
+        const foundTool = tools?.find(t => (t.manifest as any).tools.some((mt: any) => mt.name === name));
 
         if (!foundTool) throw new Error(`Tool ${name} not found`);
 
         const toolDir = await prepareTool(foundTool.id, foundTool.bundle_path);
         const secretEnv = await getSecrets(foundTool.id);
         const configEnv = foundTool.configuration?.env || {};
-        const defaultArgs = foundTool.configuration?.defaultArguments || {};
 
         const executor = new MCPExecutor(toolDir, foundTool.start_command, { ...configEnv, ...secretEnv });
-        const result = await executor.executeTool(name, { ...args, ...defaultArgs });
+        const result = await executor.executeTool(name, { ...args, ...foundTool.configuration?.defaultArguments });
 
         if (result.content) return result;
         return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
@@ -138,37 +112,31 @@ app.get('/sse', requireApiKey, async (req: AuthRequest, res: Response) => {
 // ---------------------------------------------------------
 //  ENDPOINT 2: INCOMING MESSAGES
 // ---------------------------------------------------------
-// IMPORTANT: Do NOT use bodyParser here. The transport needs the raw stream.
-app.post('/messages', async (req: Request, res: Response) => {
+app.post('/api/messages', async (req: Request, res: Response) => {
     const sessionId = req.query.sessionId as string;
-    // console.log(`[Msg] Incoming message for session: ${sessionId}`); 
-
     const session = sessions.get(sessionId);
+
     if (!session) {
-        console.warn(`[Msg] Session not found: ${sessionId}`);
+        console.log(`[Msg] 404 Session Not Found: ${sessionId}`);
         return res.status(404).send("Session not found");
     }
 
+    // Pass raw request to SDK
     await session.transport.handlePostMessage(req, res);
 });
 
+// --- DEBUG HANDLER FOR THE "CANNOT GET" ERROR ---
+app.get('/api/messages', (req, res) => {
+    console.error("❌ ERROR: Client sent GET to /api/messages! This implies a Redirect downgraded POST to GET.");
+    res.status(405).send("Method Not Allowed. Please check your URL for HTTP/HTTPS mismatches.");
+});
+
 // ---------------------------------------------------------
-//  LEGACY HTTP ENDPOINTS
+//  LEGACY ENDPOINTS
 // ---------------------------------------------------------
-// We attach bodyParser ONLY to these routes now.
 const jsonParser = bodyParser.json();
-
-app.get('/api/tools', requireApiKey, async (req: AuthRequest, res: Response): Promise<any> => {
-    // ... Copy your legacy GET logic here if you still need it ...
-    // For now, let's just return empty to prevent errors if you hit it
-    return res.json({ tools: [] });
-});
-
-app.post('/api/execute', jsonParser, requireApiKey, async (req: AuthRequest, res: Response): Promise<any> => {
-    // ... Your legacy POST logic here ...
-    // Note I added 'jsonParser' middleware to this line specifically
-    // Use the previous logic if you need this endpoint for scripts
-});
+app.get('/api/tools', requireApiKey, async (req, res) => res.json({ tools: [] }));
+app.post('/api/execute', jsonParser, requireApiKey, async (req, res) => { /* ... */ });
 
 const PORT = process.env.PORT || 8000;
 app.listen(PORT, () => console.log(`Gateway listening on port ${PORT}`));
