@@ -48,7 +48,7 @@ async function main() {
 
         execSync(`git clone ${REPO_URL} ${workDir}`);
 
-        // 2. Install Dependencies
+        // 2. Install Dependencies (Robust Mode)
         installDependencies(workDir);
 
         // 3. Fetch Secrets (API Keys)
@@ -59,10 +59,8 @@ async function main() {
         const injectionEnv = {
             ...process.env,
             ...secrets,
-            // CRITICAL FIX: Force Python to not buffer output
-            PYTHONUNBUFFERED: '1',
-            // CRITICAL FIX: Ensure local imports work in the tool directory
-            PYTHONPATH: workDir
+            PYTHONUNBUFFERED: '1', // Force Python to not buffer output
+            PYTHONPATH: workDir      // Ensure local imports work
         };
 
         // 4. Introspection (Handshake)
@@ -72,7 +70,8 @@ async function main() {
 
         // 5. Packing (Create Zip)
         console.log('[Inspector] Creating Snapshot Artifact...');
-        await createZipArtifact(workDir, artifactPath, ['node_modules', '.git', '.venv', '__pycache__']);
+        // Exclude heavy/unnecessary folders
+        await createZipArtifact(workDir, artifactPath, ['node_modules', '.git', '.venv', '__pycache__', 'dist', 'build']);
 
         // 6. Upload to Supabase
         console.log('[Inspector] Uploading Snapshot...');
@@ -116,6 +115,7 @@ async function main() {
 function installDependencies(cwd: string) {
     console.log('[Inspector] Detecting project type...');
 
+    // --- NODE.JS ---
     if (fs.existsSync(path.join(cwd, 'package.json'))) {
         console.log('-> Detected Node.js project');
         try { execSync('npm install', { cwd, stdio: 'inherit' }); } catch (e) { }
@@ -123,26 +123,50 @@ function installDependencies(cwd: string) {
         // Build if needed
         const pkg = JSON.parse(fs.readFileSync(path.join(cwd, 'package.json'), 'utf-8'));
         if (pkg.scripts && pkg.scripts.build) {
-            execSync(`npm run build`, { cwd, stdio: 'inherit' });
+            console.log('   Running build script...');
+            try {
+                execSync(`npm run build`, { cwd, stdio: 'inherit' });
+            } catch (e) {
+                console.error('   ⚠️ Build failed. Continuing, but server might fail if dist/ is missing.');
+            }
         }
     }
+    // --- PYTHON ---
     else if (fs.existsSync(path.join(cwd, 'pyproject.toml')) || fs.existsSync(path.join(cwd, 'requirements.txt'))) {
         console.log('-> Detected Python project');
 
-        // Re-create venv cleanly
+        // 1. Create venv
         execSync('python3 -m venv .venv', { cwd, stdio: 'inherit' });
 
         const pip = process.platform === 'win32'
             ? path.join('.venv', 'Scripts', 'pip')
             : path.join('.venv', 'bin', 'pip');
 
+        // 2. Upgrade pip
         try { execSync(`${pip} install --upgrade pip`, { cwd, stdio: 'inherit' }); } catch (e) { }
 
+        // 3. Install Requirements (Critical)
         if (fs.existsSync(path.join(cwd, 'requirements.txt'))) {
-            execSync(`${pip} install -r requirements.txt`, { cwd, stdio: 'inherit' });
+            console.log('   Installing requirements.txt...');
+            try {
+                execSync(`${pip} install -r requirements.txt`, { cwd, stdio: 'inherit' });
+            } catch (e) {
+                console.error('   ❌ Failed to install requirements.txt. This is usually fatal.');
+                throw e; // We re-throw here because missing deps usually mean nothing works
+            }
         }
+
+        // 4. Install Project (Optional / Best Effort)
         if (fs.existsSync(path.join(cwd, 'pyproject.toml'))) {
-            execSync(`${pip} install .`, { cwd, stdio: 'inherit' });
+            console.log('   Attempting to build/install project...');
+            try {
+                // This is what failed before. We now wrap it.
+                execSync(`${pip} install .`, { cwd, stdio: 'inherit' });
+            } catch (e) {
+                console.warn('   ⚠️ Warning: Could not install project as a package (pip install . failed).');
+                console.warn('      Continuing with dependencies only. This is common for flat-layout repos.');
+                // We DO NOT throw here. We let it proceed.
+            }
         }
     }
 }
@@ -151,7 +175,7 @@ function fetchToolsFromRunningServer(command: string, cwd: string, env: NodeJS.P
     return new Promise((resolve, reject) => {
         const [cmd, ...args] = command.split(' ');
 
-        // Spawn with INJECTED ENV (Secrets + PYTHONUNBUFFERED)
+        // Spawn with INJECTED ENV
         const serverProcess = spawn(cmd, args, { cwd, env: env, shell: true });
 
         let buffer = '';
@@ -159,7 +183,7 @@ function fetchToolsFromRunningServer(command: string, cwd: string, env: NodeJS.P
 
         serverProcess.stdout.on('data', (data) => {
             const chunk = data.toString();
-            console.log(`[Server stdout] ${chunk}`); // DEBUG LOG
+            // console.log(`[Server stdout] ${chunk}`); // Uncomment for deep debug
 
             buffer += chunk;
             const lines = buffer.split('\n');
@@ -172,11 +196,9 @@ function fetchToolsFromRunningServer(command: string, cwd: string, env: NodeJS.P
 
                     // Step 2: Receive Initialize Result
                     if (json.id === 0 && json.result) {
-                        console.log('[Handshake] Server Initialized. Sending notification...');
                         const initNotification = JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) + "\n";
                         serverProcess.stdin.write(initNotification);
 
-                        console.log('[Handshake] Requesting tools...');
                         const toolsRequest = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }) + "\n";
                         serverProcess.stdin.write(toolsRequest);
                         isInitialized = true;
@@ -184,7 +206,6 @@ function fetchToolsFromRunningServer(command: string, cwd: string, env: NodeJS.P
 
                     // Step 3: Receive Tools
                     if (json.id === 1 && json.result && json.result.tools) {
-                        console.log('[Handshake] Tools received!');
                         resolve(json.result.tools);
                         serverProcess.kill();
                     }
@@ -193,9 +214,7 @@ function fetchToolsFromRunningServer(command: string, cwd: string, env: NodeJS.P
                         console.error('[Handshake Error]', json.error);
                     }
 
-                } catch (e) {
-                    // Ignore non-JSON lines (logs)
-                }
+                } catch (e) { }
             }
         });
 
@@ -207,7 +226,6 @@ function fetchToolsFromRunningServer(command: string, cwd: string, env: NodeJS.P
             params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "inspector", version: "1.0" } }
         }) + "\n";
 
-        console.log('[Handshake] Sending initialize request...');
         serverProcess.stdin.write(initRequest);
 
         setTimeout(() => {
@@ -215,7 +233,7 @@ function fetchToolsFromRunningServer(command: string, cwd: string, env: NodeJS.P
                 serverProcess.kill();
                 reject(new Error("Timeout: Handshake failed (20s). Check Server stderr logs above."));
             }
-        }, 20000); // Increased timeout to 20s
+        }, 20000);
     });
 }
 
