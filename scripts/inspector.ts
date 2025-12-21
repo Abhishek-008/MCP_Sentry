@@ -56,32 +56,29 @@ async function main() {
         const secrets = await getSecrets(TOOL_ID);
 
         // 4. PREPARE ENVIRONMENT
-        // Calculate the VENV bin path to inject into PATH
         const venvBin = process.platform === 'win32'
             ? path.resolve(workDir, '.venv', 'Scripts')
             : path.resolve(workDir, '.venv', 'bin');
 
-        // Prepend venv bin to PATH. 
-        // This ensures 'uv', 'python', 'pip' commands use the venv versions.
         const delimiter = process.platform === 'win32' ? ';' : ':';
         const newPath = `${venvBin}${delimiter}${process.env.PATH}`;
 
         const injectionEnv = {
             ...process.env,
             ...secrets,
-            PATH: newPath,           // <--- CRITICAL FIX: Allows 'uv' and 'python' to be found
-            PYTHONUNBUFFERED: '1',   // Force Python to not buffer output
-            PYTHONPATH: workDir      // Ensure local imports work
+            PATH: newPath,
+            PYTHONUNBUFFERED: '1',
+            PYTHONPATH: workDir
         };
 
         // 5. Introspection (Handshake)
         console.log(`[Inspector] Booting server with: "${START_CMD}"...`);
+        // We now allow up to 120 seconds for the first boot
         const tools = await fetchToolsFromRunningServer(START_CMD, workDir, injectionEnv);
         console.log(`[Inspector] Successfully discovered ${tools.length} tools.`);
 
         // 6. Packing (Create Zip)
         console.log('[Inspector] Creating Snapshot Artifact...');
-        // Exclude heavy/unnecessary folders
         await createZipArtifact(workDir, artifactPath, ['node_modules', '.git', '.venv', '__pycache__', 'dist', 'build']);
 
         // 7. Upload to Supabase
@@ -131,55 +128,36 @@ function installDependencies(cwd: string) {
         console.log('-> Detected Node.js project');
         try { execSync('npm install', { cwd, stdio: 'inherit' }); } catch (e) { }
 
-        // Build if needed
         const pkg = JSON.parse(fs.readFileSync(path.join(cwd, 'package.json'), 'utf-8'));
         if (pkg.scripts && pkg.scripts.build) {
             console.log('   Running build script...');
-            try {
-                execSync(`npm run build`, { cwd, stdio: 'inherit' });
-            } catch (e) {
-                console.error('   ⚠️ Build failed. Continuing, but server might fail if dist/ is missing.');
-            }
+            try { execSync(`npm run build`, { cwd, stdio: 'inherit' }); } catch (e) { }
         }
     }
     // --- PYTHON ---
     else if (fs.existsSync(path.join(cwd, 'pyproject.toml')) || fs.existsSync(path.join(cwd, 'requirements.txt'))) {
         console.log('-> Detected Python project');
 
-        // 1. Create venv
         execSync('python3 -m venv .venv', { cwd, stdio: 'inherit' });
 
         const pip = process.platform === 'win32'
             ? path.join('.venv', 'Scripts', 'pip')
             : path.join('.venv', 'bin', 'pip');
 
-        // 2. Upgrade pip
         try { execSync(`${pip} install --upgrade pip`, { cwd, stdio: 'inherit' }); } catch (e) { }
 
-        // 3. Install 'uv' (CRITICAL ROBUSTNESS FIX)
-        // Many new tools use 'uv run', so we must ensure 'uv' is in the venv.
+        // Install 'uv' universally
         console.log('   Installing uv support...');
         try { execSync(`${pip} install uv`, { cwd, stdio: 'inherit' }); } catch (e) { }
 
-        // 4. Install Requirements
         if (fs.existsSync(path.join(cwd, 'requirements.txt'))) {
             console.log('   Installing requirements.txt...');
-            try {
-                execSync(`${pip} install -r requirements.txt`, { cwd, stdio: 'inherit' });
-            } catch (e) {
-                console.error('   ❌ Failed to install requirements.txt.');
-                throw e;
-            }
+            try { execSync(`${pip} install -r requirements.txt`, { cwd, stdio: 'inherit' }); } catch (e) { throw e; }
         }
 
-        // 5. Install Project (Best Effort)
         if (fs.existsSync(path.join(cwd, 'pyproject.toml'))) {
             console.log('   Attempting to build/install project...');
-            try {
-                execSync(`${pip} install .`, { cwd, stdio: 'inherit' });
-            } catch (e) {
-                console.warn('   ⚠️ Warning: Could not install project as a package. Continuing with dependencies.');
-            }
+            try { execSync(`${pip} install .`, { cwd, stdio: 'inherit' }); } catch (e) { }
         }
     }
 }
@@ -187,36 +165,41 @@ function installDependencies(cwd: string) {
 function fetchToolsFromRunningServer(command: string, cwd: string, env: NodeJS.ProcessEnv): Promise<any[]> {
     return new Promise((resolve, reject) => {
         const [cmd, ...args] = command.split(' ');
-
-        // Spawn with INJECTED ENV
         const serverProcess = spawn(cmd, args, { cwd, env: env, shell: true });
 
         let buffer = '';
         let isInitialized = false;
         let stderrLog = '';
 
-        // --- ROBUSTNESS: Handle Early Exit ---
-        serverProcess.on('error', (err) => {
-            reject(new Error(`Failed to spawn process: ${err.message}`));
-        });
+        // TIMEOUT MANAGEMENT
+        // We start with 120s. Every time we receive data (log or output), we extend the life.
+        let timeoutHandle: NodeJS.Timeout;
+
+        const refreshTimeout = () => {
+            if (timeoutHandle) clearTimeout(timeoutHandle);
+            timeoutHandle = setTimeout(() => {
+                if (!isInitialized) {
+                    serverProcess.kill();
+                    reject(new Error("Timeout: Server took too long (>120s idle) to startup.\nLogs:\n" + stderrLog));
+                }
+            }, 120000); // 2 Minutes Max Idle Time
+        };
+
+        refreshTimeout();
+
+        serverProcess.on('error', (err) => reject(new Error(`Spawn Error: ${err.message}`)));
 
         serverProcess.on('exit', (code) => {
-            if (!isInitialized) {
-                reject(new Error(`Server exited early (code ${code}). Logs:\n${stderrLog}`));
-            }
+            if (!isInitialized) reject(new Error(`Server exited early (code ${code}). Logs:\n${stderrLog}`));
         });
 
-        // --- ROBUSTNESS: Handle Broken Pipes on Stdin ---
         serverProcess.stdin.on('error', (err) => {
-            if ((err as any).code !== 'EPIPE') {
-                console.error('[Inspector] Stdin Error:', err);
-            }
+            if ((err as any).code !== 'EPIPE') console.error('[Inspector] Stdin Error:', err);
         });
 
         serverProcess.stdout.on('data', (data) => {
+            refreshTimeout(); // Keep alive on activity
             const chunk = data.toString();
-            // console.log(`[Server stdout] ${chunk}`); 
-
             buffer += chunk;
             const lines = buffer.split('\n');
             buffer = lines.pop() || '';
@@ -226,7 +209,6 @@ function fetchToolsFromRunningServer(command: string, cwd: string, env: NodeJS.P
                 try {
                     const json = JSON.parse(line);
 
-                    // Step 2: Receive Initialize Result
                     if (json.id === 0 && json.result) {
                         const initNotification = JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) + "\n";
                         if (!serverProcess.stdin.destroyed) serverProcess.stdin.write(initNotification);
@@ -236,8 +218,8 @@ function fetchToolsFromRunningServer(command: string, cwd: string, env: NodeJS.P
                         isInitialized = true;
                     }
 
-                    // Step 3: Receive Tools
                     if (json.id === 1 && json.result && json.result.tools) {
+                        clearTimeout(timeoutHandle);
                         resolve(json.result.tools);
                         serverProcess.kill();
                     }
@@ -246,27 +228,18 @@ function fetchToolsFromRunningServer(command: string, cwd: string, env: NodeJS.P
         });
 
         serverProcess.stderr.on('data', (data) => {
+            refreshTimeout(); // Keep alive on logs (compilation output)
             const log = data.toString();
             stderrLog += log;
             console.error(`[Server stderr] ${log}`);
         });
 
-        // Step 1: Send Initialize Request
         const initRequest = JSON.stringify({
             jsonrpc: "2.0", id: 0, method: "initialize",
             params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "inspector", version: "1.0" } }
         }) + "\n";
 
-        if (!serverProcess.stdin.destroyed) {
-            serverProcess.stdin.write(initRequest);
-        }
-
-        setTimeout(() => {
-            if (!isInitialized) {
-                serverProcess.kill();
-                reject(new Error("Timeout: Handshake failed (20s). Check Server stderr logs above."));
-            }
-        }, 20000);
+        if (!serverProcess.stdin.destroyed) serverProcess.stdin.write(initRequest);
     });
 }
 
@@ -274,18 +247,10 @@ function createZipArtifact(sourceDir: string, outPath: string, ignoreList: strin
     return new Promise((resolve, reject) => {
         const output = fs.createWriteStream(outPath);
         const archive = archiver('zip', { zlib: { level: 9 } });
-
         output.on('close', () => resolve());
         archive.on('error', (err) => reject(err));
-
         archive.pipe(output);
-
-        archive.glob('**/*', {
-            cwd: sourceDir,
-            ignore: ignoreList.map(i => `**/${i}/**`),
-            dot: true
-        });
-
+        archive.glob('**/*', { cwd: sourceDir, ignore: ignoreList.map(i => `**/${i}/**`), dot: true });
         archive.finalize();
     });
 }
