@@ -7,10 +7,15 @@ import dotenv from 'dotenv';
 
 dotenv.config();
 
-const supabase = createClient(
-    process.env.SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_ROLE_KEY!
-);
+// --- HELPER: Lazy Client Initialization ---
+// We initialize this INSIDE the function to prevent top-level crashes
+// if variables are missing during server startup.
+function getSupabase() {
+    const url = process.env.SUPABASE_URL;
+    const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+    if (!url || !key) throw new Error("❌ Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY");
+    return createClient(url, key);
+}
 
 // --- HELPER: Find a Stable Python Path (Resolves to absolute executable) ---
 async function findStablePythonPath(): Promise<string> {
@@ -73,10 +78,12 @@ export async function prepareTool(toolId: string, bundlePath: string): Promise<s
     if (fs.existsSync(toolDir)) await fs.remove(toolDir);
     await fs.ensureDir(toolDir);
 
-    // 2. DOWNLOAD
+    // 2. DOWNLOAD (Lazy Load Supabase here)
     console.log(`[Provisioner] Downloading bundle: ${bundlePath}...`);
+    const supabase = getSupabase(); // <--- SAFE INITIALIZATION
+
     const { data, error } = await supabase.storage
-        .from('tool-bundles')
+        .from('tool_bundles') // Ensure this matches your bucket name (tool-bundles vs tool_bundles)
         .download(bundlePath);
 
     if (error || !data) throw new Error(`Failed to download bundle: ${error?.message}`);
@@ -100,10 +107,22 @@ export async function prepareTool(toolId: string, bundlePath: string): Promise<s
             try { await execa('npm', ['install', '-g', 'pnpm'], { stdio: 'ignore' }); } catch (e) { }
             await execa('pnpm', ['install'], { cwd: toolDir });
         } else {
-            await execa('npm', ['install', '--omit=dev'], { cwd: toolDir });
+            // --- CRITICAL FIX START ---
+            // Replaced 'npm install --omit=dev' with 'npm install'
+            // We NEED dev dependencies (like typescript, shx) to build source-based tools.
+            console.log('      Running full npm install (including devDeps)...');
+            await execa('npm', ['install'], { cwd: toolDir });
+            // --- CRITICAL FIX END ---
         }
+
+        // Build if needed
         if (fs.existsSync(path.join(toolDir, 'tsconfig.json'))) {
-            try { await execa('npm', ['run', 'build'], { cwd: toolDir }); } catch (e) { }
+            console.log('      Running build script...');
+            try {
+                await execa('npm', ['run', 'build'], { cwd: toolDir });
+            } catch (e: any) {
+                console.error("      Build warning (might be okay if pre-built):", e.message);
+            }
         }
 
     } else if (isPython) {
@@ -136,7 +155,6 @@ export async function prepareTool(toolId: string, bundlePath: string): Promise<s
                     : path.join(toolDir, '.venv', 'bin', 'uv');
 
                 // CRITICAL FIX: Pass --python flag to force uv to use our stable version
-                // This prevents it from deleting our venv and using System Python 3.14
                 console.log(`      Running uv sync with python: ${pythonExe}`);
                 await execa(venvUv, ['sync', '--python', pythonExe], { cwd: toolDir });
 

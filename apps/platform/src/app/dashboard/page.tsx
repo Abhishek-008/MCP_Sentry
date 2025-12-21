@@ -99,11 +99,15 @@ export default function Dashboard() {
         if (!apiKey) return 'Generating key...';
 
         // This points to your live Railway server
-        const gatewayUrl = process.env.NEXT_PUBLIC_GATEWAY_URL || 'http://localhost:8000';
+        let gatewayUrl = process.env.NEXT_PUBLIC_GATEWAY_URL || 'http://localhost:8000';
+
+        if (gatewayUrl.endsWith('/')) {
+            gatewayUrl = gatewayUrl.slice(0, -1);
+        }
 
         return JSON.stringify({
             "mcpServers": {
-                "mcp-gateway-cloud": {
+                "mcp-gateway": {
                     "url": `${gatewayUrl}/sse?apiKey=${apiKey}`
                 }
             }
