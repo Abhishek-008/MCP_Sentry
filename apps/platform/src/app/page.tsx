@@ -1,136 +1,174 @@
-'use client'
+import React from 'react';
+import { ArrowRight, Shield, Zap, Lock, Cloud, Code } from 'lucide-react';
+import Header from './components/Header';
+import Footer from './components/Footer';
 
-import { useEffect, useState } from 'react'
-import { User } from '@supabase/supabase-js'
-import IngestForm from './components/IngestForm'
-import AuthForm from './components/AuthForm'
-import { createClient } from '../../utils/supabase/client'
+export default function HomePage() {
+  // Mock user state - replace with actual auth
+  const user = null;
 
-export default function Home() {
-  const [user, setUser] = useState<User | null>(null)
-  const [loading, setLoading] = useState(true)
-  const supabase = createClient()
-
-  useEffect(() => {
-    // 1. Check active session on load
-    const checkUser = async () => {
-      const { data: { user } } = await supabase.auth.getUser()
-      setUser(user)
-      setLoading(false)
-    }
-    checkUser()
-
-    // 2. Listen for auth changes (login/logout)
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
-      setUser(session?.user ?? null)
-    })
-
-    return () => subscription.unsubscribe()
-  }, [])
-
-  const handleLogout = async () => {
-    await supabase.auth.signOut()
-  }
-
-  if (loading) {
-    return (
-      <div className="flex min-h-screen items-center justify-center bg-gradient-to-br from-gray-900 via-slate-900 to-black">
-        <div className="text-center">
-          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-cyan-400 mx-auto mb-4"></div>
-          <p className="text-gray-400">Loading...</p>
-        </div>
-      </div>
-    )
-  }
+  const handleLogout = () => {
+    console.log('Logout');
+  };
 
   return (
-    <main className="min-h-screen bg-gradient-to-br from-gray-900 via-slate-900 to-black text-white overflow-hidden relative">
-      {/* Animated background effects */}
-      <div className="absolute inset-0 overflow-hidden pointer-events-none">
-        <div className="absolute top-0 -left-4 w-72 h-72 bg-purple-500 rounded-full mix-blend-multiply filter blur-xl opacity-20 animate-blob"></div>
-        <div className="absolute top-0 -right-4 w-72 h-72 bg-cyan-500 rounded-full mix-blend-multiply filter blur-xl opacity-20 animate-blob animation-delay-2000"></div>
-        <div className="absolute -bottom-8 left-20 w-72 h-72 bg-pink-500 rounded-full mix-blend-multiply filter blur-xl opacity-20 animate-blob animation-delay-4000"></div>
-      </div>
+    <div className="min-h-screen bg-black text-gray-100 font-mono flex flex-col">
+      <Header/>
 
-      <div className="relative z-10 flex min-h-screen flex-col items-center justify-center p-6">
-        <div className="w-full max-w-7xl">
-          {/* Header */}
-          <div className="flex justify-between items-center mb-12">
-            <div>
-              <h1 className="text-4xl font-bold bg-gradient-to-r from-cyan-400 via-blue-500 to-purple-600 bg-clip-text text-transparent">
-                Secure MCP Marketplace
-              </h1>
-              <p className="text-gray-400 mt-2">Zero Trust MCP Hosting Platform</p>
-            </div>
-
-            {user && (
-              <div className="flex gap-4 items-center bg-white/10 backdrop-blur-md px-6 py-3 rounded-full border border-white/20 shadow-lg">
-                <div className="flex items-center gap-2">
-                  <div className="w-8 h-8 bg-gradient-to-r from-cyan-400 to-blue-500 rounded-full flex items-center justify-center text-white font-semibold">
-                    {user.email?.[0].toUpperCase()}
-                  </div>
-                  <span className="text-sm font-medium text-white">{user.email}</span>
-                </div>
-                <button
-                  onClick={handleLogout}
-                  className="bg-red-500/90 hover:bg-red-600 text-white px-4 py-2 rounded-lg text-sm font-medium transition-all duration-200 hover:scale-105"
-                >
-                  Logout
-                </button>
-              </div>
-            )}
+      {/* Hero Section */}
+      <section className="max-w-7xl mx-auto px-6 pt-20 pb-32">
+        <div className="text-center space-y-8">
+          <div className="inline-block">
+            <span className="px-4 py-1.5 bg-emerald-500/10 border border-emerald-500/20 rounded-full text-emerald-400 text-sm">
+              Zero Trust MCP Execution
+            </span>
           </div>
 
-          {/* Main Content */}
-          {!user ? (
-            <div className="grid lg:grid-cols-2 gap-12 items-center">
-              {/* Left: Marketing Content */}
-              <div className="space-y-8">
-                <div className="space-y-4">
-                  <h2 className="text-5xl font-bold leading-tight text-white">
-                    Deploy MCP Agents in
-                    <span className="block bg-gradient-to-r from-cyan-400 via-blue-500 to-purple-600 bg-clip-text text-transparent">
-                      Isolated Sandboxes
-                    </span>
-                  </h2>
-                  <p className="text-xl text-gray-400 leading-relaxed">
-                    Securely host and manage your Model Context Protocol agents with enterprise-grade security and zero-trust architecture.
-                  </p>
-                </div>
+          <h1 className="text-6xl md:text-7xl font-bold leading-tight">
+            Deploy MCP Servers
+            <br />
+            <span className="text-emerald-400">Without the Risk</span>
+          </h1>
 
-                <div className="space-y-4">
-                  <Feature icon="🔒" title="Zero Trust Security" description="Every agent runs in an isolated sandbox" />
-                  <Feature icon="⚡" title="Instant Deployment" description="Deploy from GitHub in seconds" />
-                  <Feature icon="🔧" title="Easy Configuration" description="Simple environment and argument management" />
-                  <Feature icon="📊" title="Real-time Monitoring" description="Track your agents' performance live" />
-                </div>
-              </div>
+          <p className="text-xl text-gray-400 max-w-3xl mx-auto leading-relaxed">
+            A multi-tenant platform where developers can register Model Context Protocol servers
+            and users can safely execute them with complete isolation. No shared resources, no data leaks.
+          </p>
 
-              {/* Right: Auth Form */}
-              <div>
-                <AuthForm />
-              </div>
-            </div>
-          ) : (
-            // If logged in, show the Ingest Form
-            <div className="max-w-4xl mx-auto">
-              <IngestForm user={user} />
-            </div>
-          )}
+          <div className="flex items-center justify-center space-x-4 pt-4">
+            <a
+              href="/deploy"
+              className="px-8 py-4 bg-emerald-500 hover:bg-emerald-600 text-black font-semibold rounded-lg transition-all transform hover:scale-105 flex items-center space-x-2"
+            >
+              <span>Deploy Your Server</span>
+              <ArrowRight className="w-5 h-5" />
+            </a>
+            <a
+              href="/docs"
+              className="px-8 py-4 border border-gray-700 hover:border-gray-600 rounded-lg transition-colors"
+            >
+              View Docs
+            </a>
+          </div>
         </div>
-      </div>
-    </main>
-  )
-}
 
-function Feature({ icon, title, description }: { icon: string; title: string; description: string }) {
-  return (
-    <div className="flex items-start gap-4 bg-white/5 backdrop-blur-sm p-4 rounded-xl border border-white/10 hover:bg-white/10 transition-all duration-200">
-      <div className="text-3xl">{icon}</div>
-      <div>
-        <h3 className="font-semibold text-white mb-1">{title}</h3>
-        <p className="text-gray-400 text-sm">{description}</p>
-      </div>
+        {/* Terminal Preview */}
+        <div className="mt-20 max-w-4xl mx-auto">
+          <div className="bg-gray-900 rounded-lg border border-gray-800 overflow-hidden shadow-2xl">
+            <div className="flex items-center space-x-2 px-4 py-3 bg-gray-800 border-b border-gray-700">
+              <div className="w-3 h-3 rounded-full bg-red-500"></div>
+              <div className="w-3 h-3 rounded-full bg-yellow-500"></div>
+              <div className="w-3 h-3 rounded-full bg-green-500"></div>
+              <span className="text-sm text-gray-500 ml-4">deploy.sh</span>
+            </div>
+            <div className="p-6 space-y-2 text-sm">
+              <div className="flex items-start">
+                <span className="text-emerald-400">$</span>
+                <span className="ml-2 text-gray-300">mcp-sentry deploy github.com/user/mcp-server</span>
+              </div>
+              <div className="text-gray-500">→ Validating repository...</div>
+              <div className="text-gray-500">→ Building Docker image...</div>
+              <div className="text-gray-500">→ Deploying to isolated sandbox...</div>
+              <div className="flex items-start text-emerald-400">
+                <span>✓</span>
+                <span className="ml-2">Deployed: https://mcp-abc123.railway.app</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* Features Grid */}
+      <section className="max-w-7xl mx-auto px-6 py-20 border-t border-gray-900">
+        <div className="text-center mb-16">
+          <h2 className="text-4xl font-bold mb-4">How It Works</h2>
+          <p className="text-gray-400 text-lg">Three layers of defense for complete isolation</p>
+        </div>
+
+        <div className="grid md:grid-cols-3 gap-8">
+          {/* Feature 1 */}
+          <div className="bg-gray-900 border border-gray-800 rounded-lg p-8 hover:border-emerald-500/30 transition-colors">
+            <div className="w-12 h-12 bg-emerald-500/10 rounded-lg flex items-center justify-center mb-6">
+              <Shield className="w-6 h-6 text-emerald-400" />
+            </div>
+            <h3 className="text-xl font-bold mb-3">Input Hardening</h3>
+            <p className="text-gray-400 leading-relaxed">
+              Every server submission goes through static analysis and dependency scanning.
+              We validate manifests and sanitize tool descriptions before they ever touch production.
+            </p>
+          </div>
+
+          {/* Feature 2 */}
+          <div className="bg-gray-900 border border-gray-800 rounded-lg p-8 hover:border-emerald-500/30 transition-colors">
+            <div className="w-12 h-12 bg-emerald-500/10 rounded-lg flex items-center justify-center mb-6">
+              <Lock className="w-6 h-6 text-emerald-400" />
+            </div>
+            <h3 className="text-xl font-bold mb-3">Runtime Isolation</h3>
+            <p className="text-gray-400 leading-relaxed">
+              Each execution runs in an ephemeral micro-VM with network allowlisting.
+              Secrets are injected at runtime, never stored in code. The sandbox is destroyed after use.
+            </p>
+          </div>
+
+          {/* Feature 3 */}
+          <div className="bg-gray-900 border border-gray-800 rounded-lg p-8 hover:border-emerald-500/30 transition-colors">
+            <div className="w-12 h-12 bg-emerald-500/10 rounded-lg flex items-center justify-center mb-6">
+              <Zap className="w-6 h-6 text-emerald-400" />
+            </div>
+            <h3 className="text-xl font-bold mb-3">Traffic Mediation</h3>
+            <p className="text-gray-400 leading-relaxed">
+              AI agents never talk to tools directly. Our gateway validates every request
+              against the registry and enforces dynamic policies for sensitive operations.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      {/* Cloud Deployment Section */}
+      <section className="max-w-7xl mx-auto px-6 py-20">
+        <div className="bg-gradient-to-br from-emerald-500/10 to-emerald-500/5 border border-emerald-500/20 rounded-2xl p-12">
+          <div className="flex items-start space-x-6">
+            <div className="w-16 h-16 bg-emerald-500/20 rounded-xl flex items-center justify-center flex-shrink-0">
+              <Cloud className="w-8 h-8 text-emerald-400" />
+            </div>
+            <div className="flex-1">
+              <h2 className="text-3xl font-bold mb-4">Automatic Cloud Deployment</h2>
+              <p className="text-gray-300 text-lg leading-relaxed mb-6">
+                Point us to your GitHub repository and we handle the rest. We clone, validate,
+                containerize, and deploy your MCP server to Railway with a public HTTPS endpoint.
+                No Docker knowledge required, no infrastructure headaches.
+              </p>
+              <div className="flex items-center space-x-3 text-sm text-gray-400">
+                <Code className="w-4 h-4" />
+                <span>Supports Node.js & Python</span>
+                <span className="text-gray-700">•</span>
+                <span>Auto-generated Dockerfiles</span>
+                <span className="text-gray-700">•</span>
+                <span>HTTPS by default</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* CTA Section */}
+      <section className="max-w-7xl mx-auto px-6 py-20">
+        <div className="text-center bg-gray-900 border border-gray-800 rounded-2xl p-16">
+          <h2 className="text-4xl font-bold mb-4">Ready to Deploy?</h2>
+          <p className="text-gray-400 text-lg mb-8 max-w-2xl mx-auto">
+            Join developers building the next generation of AI-powered tools with complete security and isolation.
+          </p>
+          <a
+            href="/login"
+            className="px-10 py-4 bg-emerald-500 hover:bg-emerald-600 text-black font-semibold rounded-lg transition-all transform hover:scale-105 inline-flex items-center space-x-2"
+          >
+            <span>Get Started Free</span>
+            <ArrowRight className="w-5 h-5" />
+          </a>
+        </div>
+      </section>
+
+      <Footer />
     </div>
-  )
+  );
 }
