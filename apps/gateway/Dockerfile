@@ -26,24 +26,22 @@ WORKDIR /app
 
 # 6. Dependencies
 COPY package.json ./
-# We install devDependencies too (false flag) just to ensure 'tsc' works
 RUN npm install --include=dev
 
 # 7. Source Code
 COPY src ./src
 
-# 8. FORCE BUILD (The Fix)
-# Instead of relying on your local tsconfig, we generate a known-good one
-# that guarantees output to /app/dist
-RUN echo '{"compilerOptions":{"target":"es2020","module":"commonjs","outDir":"./dist","rootDir":"./src","strict":true,"esModuleInterop":true,"skipLibCheck":true,"forceConsistentCasingInFileNames":true}}' > tsconfig.docker.json
+# 8. FORCE BUILD (THE FIX IS HERE)
+# We changed "module" from "commonjs" to "nodenext" to match "type": "module" in package.json
+RUN echo '{"compilerOptions":{"target":"es2020","module":"nodenext","moduleResolution":"nodenext","outDir":"./dist","rootDir":"./src","strict":true,"esModuleInterop":true,"skipLibCheck":true,"forceConsistentCasingInFileNames":true}}' > tsconfig.docker.json
 
-# 9. Run Compilation using the custom config
+# 9. Run Compilation
 RUN npx tsc -p tsconfig.docker.json
 
-# 10. Debug Step: Verify the file exists (This will show in build logs if it fails)
+# 10. Verify Build
 RUN ls -la dist/
 
-# 11. Create Cache Directory
+# 11. Runtime Cache
 RUN mkdir -p runtime_cache
 
 # 12. Env & Start
