@@ -13,17 +13,14 @@ dotenv.config();
 
 const app = express();
 app.use(cors());
-// IMPORTANT: Text parser is needed for JSON-RPC over SSE
-app.use(bodyParser.json());
+
+// REMOVED: app.use(bodyParser.json()); <-- This was causing the hang!
 
 const supabase = createClient(
     process.env.SUPABASE_URL!,
     process.env.SUPABASE_SERVICE_ROLE_KEY!
 );
 
-// --- SESSION STORAGE ---
-// We need to store active SSE connections to handle incoming messages
-// Map<SessionID, { transport, server }>
 const sessions = new Map<string, { transport: SSEServerTransport, server: Server }>();
 
 // --- AUTH MIDDLEWARE ---
@@ -34,6 +31,7 @@ interface AuthRequest extends Request {
 const requireApiKey = async (req: AuthRequest, res: Response, next: NextFunction) => {
     const apiKey = req.headers['x-api-key'] || req.query.apiKey;
     if (!apiKey || typeof apiKey !== 'string') {
+        console.log('[Auth] Missing Key');
         return res.status(401).json({ error: 'Missing API Key' });
     }
     try {
@@ -43,15 +41,18 @@ const requireApiKey = async (req: AuthRequest, res: Response, next: NextFunction
             .eq('key_hash', apiKey)
             .single();
 
-        if (!keyData) return res.status(403).json({ error: 'Invalid API Key' });
+        if (!keyData) {
+            console.log('[Auth] Invalid Key');
+            return res.status(403).json({ error: 'Invalid API Key' });
+        }
         req.user = { id: keyData.user_id };
         next();
     } catch (err) {
+        console.error('[Auth] Error:', err);
         return res.status(500).json({ error: 'Auth Verification Failed' });
     }
 };
 
-// --- HELPER: Fetch Secrets ---
 async function getSecrets(toolId: string) {
     const { data: secrets } = await supabase.from('tool_secrets').select('key, value').eq('tool_id', toolId);
     const secretMap: NodeJS.ProcessEnv = {};
@@ -60,51 +61,47 @@ async function getSecrets(toolId: string) {
 }
 
 // ---------------------------------------------------------
-//  ENDPOINT 1: SSE CONNECT (What Cursor Connects To)
+//  ENDPOINT 1: SSE CONNECT
 // ---------------------------------------------------------
 app.get('/sse', requireApiKey, async (req: AuthRequest, res: Response) => {
+    console.log(`[SSE] New Connection from User: ${req.user!.id}`);
     const userId = req.user!.id;
 
-    // 1. Create a specific transport for this connection
-    // Note: We point the "endpoint" to /messages with a session ID query param
     const transport = new SSEServerTransport("/messages", res);
-
-    // 2. Create a specific MCP Server instance for this user
     const server = new Server({ name: "gateway", version: "1.0.0" }, { capabilities: { tools: {} } });
 
-    // 3. Register Tool Listing Logic
     server.setRequestHandler(ListToolsRequestSchema, async () => {
+        console.log(`[SSE] Client asked for Tool List (User: ${userId})`);
         const { data: tools } = await supabase
             .from('tools')
             .select('id, manifest, user_id, is_public')
             .eq('status', 'active')
             .or(`user_id.eq.${userId},is_public.eq.true`);
 
-        return {
-            tools: (tools || []).map(t => {
-                const manifest = t.manifest as any;
-                return (manifest.tools || []).map((mt: any) => ({
-                    name: mt.name,
-                    description: mt.description,
-                    inputSchema: mt.inputSchema,
-                    _toolId: t.id // Internal ID for execution
-                }));
-            }).flat()
-        };
+        const list = (tools || []).map(t => {
+            const manifest = t.manifest as any;
+            return (manifest.tools || []).map((mt: any) => ({
+                name: mt.name,
+                description: mt.description,
+                inputSchema: mt.inputSchema,
+                _toolId: t.id
+            }));
+        }).flat();
+
+        console.log(`[SSE] Returning ${list.length} tools`);
+        return { tools: list };
     });
 
-    // 4. Register Execution Logic
     server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const { name, arguments: args } = request.params;
+        console.log(`[SSE] Client executing: ${name}`);
 
-        // Find the tool ID by looking up the name again (or optimizing this later)
         const { data: tools } = await supabase
             .from('tools')
             .select('*')
             .eq('status', 'active')
             .or(`user_id.eq.${userId},is_public.eq.true`);
 
-        // Find the matching tool definition
         let foundTool = null;
         for (const t of tools || []) {
             const manifest = t.manifest as any;
@@ -116,7 +113,6 @@ app.get('/sse', requireApiKey, async (req: AuthRequest, res: Response) => {
 
         if (!foundTool) throw new Error(`Tool ${name} not found`);
 
-        // Prepare Execution
         const toolDir = await prepareTool(foundTool.id, foundTool.bundle_path);
         const secretEnv = await getSecrets(foundTool.id);
         const configEnv = foundTool.configuration?.env || {};
@@ -125,17 +121,14 @@ app.get('/sse', requireApiKey, async (req: AuthRequest, res: Response) => {
         const executor = new MCPExecutor(toolDir, foundTool.start_command, { ...configEnv, ...secretEnv });
         const result = await executor.executeTool(name, { ...args, ...defaultArgs });
 
-        // Format Result for MCP
         if (result.content) return result;
         return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
     });
 
-    // 5. Connect and Start
-    // Store the session so we can handle incoming messages later
     sessions.set(transport.sessionId, { transport, server });
 
-    // Cleanup when connection closes
     res.on('close', () => {
+        console.log('[SSE] Connection Closed');
         sessions.delete(transport.sessionId);
     });
 
@@ -143,22 +136,39 @@ app.get('/sse', requireApiKey, async (req: AuthRequest, res: Response) => {
 });
 
 // ---------------------------------------------------------
-//  ENDPOINT 2: INCOMING MESSAGES (Cursor talks back here)
+//  ENDPOINT 2: INCOMING MESSAGES
 // ---------------------------------------------------------
+// IMPORTANT: Do NOT use bodyParser here. The transport needs the raw stream.
 app.post('/messages', async (req: Request, res: Response) => {
-    // The SDK sends the session ID in the query string
     const sessionId = req.query.sessionId as string;
-    const session = sessions.get(sessionId);
+    // console.log(`[Msg] Incoming message for session: ${sessionId}`); 
 
+    const session = sessions.get(sessionId);
     if (!session) {
+        console.warn(`[Msg] Session not found: ${sessionId}`);
         return res.status(404).send("Session not found");
     }
 
-    // Pass the JSON body to the transport
     await session.transport.handlePostMessage(req, res);
 });
 
+// ---------------------------------------------------------
+//  LEGACY HTTP ENDPOINTS
+// ---------------------------------------------------------
+// We attach bodyParser ONLY to these routes now.
+const jsonParser = bodyParser.json();
 
+app.get('/api/tools', requireApiKey, async (req: AuthRequest, res: Response): Promise<any> => {
+    // ... Copy your legacy GET logic here if you still need it ...
+    // For now, let's just return empty to prevent errors if you hit it
+    return res.json({ tools: [] });
+});
+
+app.post('/api/execute', jsonParser, requireApiKey, async (req: AuthRequest, res: Response): Promise<any> => {
+    // ... Your legacy POST logic here ...
+    // Note I added 'jsonParser' middleware to this line specifically
+    // Use the previous logic if you need this endpoint for scripts
+});
 
 const PORT = process.env.PORT || 8000;
 app.listen(PORT, () => console.log(`Gateway listening on port ${PORT}`));
