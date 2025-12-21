@@ -5,184 +5,160 @@ import { createClient } from '@supabase/supabase-js';
 import { prepareTool } from './provisioner.js';
 import { MCPExecutor } from './executor.js';
 import dotenv from 'dotenv';
+import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
+import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 
 dotenv.config();
 
 const app = express();
 app.use(cors());
+// IMPORTANT: Text parser is needed for JSON-RPC over SSE
 app.use(bodyParser.json());
 
-// Initialize Supabase Admin (Needs Service Role to lookup keys securely)
 const supabase = createClient(
     process.env.SUPABASE_URL!,
     process.env.SUPABASE_SERVICE_ROLE_KEY!
 );
 
+// --- SESSION STORAGE ---
+// We need to store active SSE connections to handle incoming messages
+// Map<SessionID, { transport, server }>
+const sessions = new Map<string, { transport: SSEServerTransport, server: Server }>();
+
 // --- AUTH MIDDLEWARE ---
-// Extends Request to include the authenticated user
 interface AuthRequest extends Request {
     user?: { id: string };
 }
 
 const requireApiKey = async (req: AuthRequest, res: Response, next: NextFunction) => {
-    // 1. Extract Key (Support Header or Query Param for SSE ease)
     const apiKey = req.headers['x-api-key'] || req.query.apiKey;
-
     if (!apiKey || typeof apiKey !== 'string') {
         return res.status(401).json({ error: 'Missing API Key' });
     }
-
     try {
-        // 2. Validate Key against DB
-        // We assume the key sent is the raw key, but for security, usually you send a hash.
-        // For MVP, we query by the key_hash column assuming you stored it correctly,
-        // OR if you stored the raw key directly (simpler for now).
-
-        // Let's assume for this step you verify against the 'key_hash' column.
-        const { data: keyData, error } = await supabase
+        const { data: keyData } = await supabase
             .from('api_keys')
             .select('user_id')
-            .eq('key_hash', apiKey) // In prod, hash the input first!
+            .eq('key_hash', apiKey)
             .single();
 
-        if (error || !keyData) {
-            return res.status(403).json({ error: 'Invalid API Key' });
-        }
-
-        // 3. Attach User ID to Request
+        if (!keyData) return res.status(403).json({ error: 'Invalid API Key' });
         req.user = { id: keyData.user_id };
         next();
-
     } catch (err) {
         return res.status(500).json({ error: 'Auth Verification Failed' });
     }
 };
 
-// --- HELPER: Fetch Secrets securely ---
+// --- HELPER: Fetch Secrets ---
 async function getSecrets(toolId: string) {
-    const { data: secrets } = await supabase
-        .from('tool_secrets')
-        .select('key, value')
-        .eq('tool_id', toolId);
-
+    const { data: secrets } = await supabase.from('tool_secrets').select('key, value').eq('tool_id', toolId);
     const secretMap: NodeJS.ProcessEnv = {};
-    if (secrets) {
-        secrets.forEach(s => {
-            secretMap[s.key] = s.value;
-        });
-    }
+    if (secrets) secrets.forEach(s => secretMap[s.key] = s.value);
     return secretMap;
 }
 
-// ------------------------------------
+// ---------------------------------------------------------
+//  ENDPOINT 1: SSE CONNECT (What Cursor Connects To)
+// ---------------------------------------------------------
+app.get('/sse', requireApiKey, async (req: AuthRequest, res: Response) => {
+    const userId = req.user!.id;
 
-// 1. List Tools Endpoint (SECURED)
-// Only returns tools belonging to the authenticated user
-app.get('/api/tools', requireApiKey, async (req: AuthRequest, res: Response): Promise<any> => {
-    try {
-        const userId = req.user!.id; // Guaranteed by middleware
+    // 1. Create a specific transport for this connection
+    // Note: We point the "endpoint" to /messages with a session ID query param
+    const transport = new SSEServerTransport("/messages", res);
 
-        const { data: tools, error } = await supabase
+    // 2. Create a specific MCP Server instance for this user
+    const server = new Server({ name: "gateway", version: "1.0.0" }, { capabilities: { tools: {} } });
+
+    // 3. Register Tool Listing Logic
+    server.setRequestHandler(ListToolsRequestSchema, async () => {
+        const { data: tools } = await supabase
             .from('tools')
-            .select('id, manifest')
+            .select('id, manifest, user_id, is_public')
             .eq('status', 'active')
             .or(`user_id.eq.${userId},is_public.eq.true`);
 
-        if (error) throw error;
+        return {
+            tools: (tools || []).map(t => {
+                const manifest = t.manifest as any;
+                return (manifest.tools || []).map((mt: any) => ({
+                    name: mt.name,
+                    description: mt.description,
+                    inputSchema: mt.inputSchema,
+                    _toolId: t.id // Internal ID for execution
+                }));
+            }).flat()
+        };
+    });
 
-        // Flatten tools for the client
-        const mcpTools = tools.map(t => {
-            const manifest = t.manifest as any;
-            return (manifest.tools || []).map((mt: any) => ({
-                name: mt.name,
-                description: mt.description,
-                inputSchema: mt.inputSchema,
-                _toolId: t.id
-            }));
-        }).flat();
+    // 4. Register Execution Logic
+    server.setRequestHandler(CallToolRequestSchema, async (request) => {
+        const { name, arguments: args } = request.params;
 
-        return res.json({ tools: mcpTools });
-    } catch (err: any) {
-        console.error('[List Error]', err);
-        return res.status(500).json({ error: err.message });
-    }
-});
-
-// 2. Execute Endpoint (SECURED)
-app.post('/api/execute', requireApiKey, async (req: AuthRequest, res: Response): Promise<any> => {
-    const { toolId, toolName, arguments: userArgs } = req.body;
-    const userId = req.user!.id;
-    const requestId = `req_${Date.now()}`;
-
-    if (!toolId || !toolName) {
-        return res.status(400).json({ error: 'Missing toolId or toolName' });
-    }
-
-    try {
-        console.time(requestId);
-        console.log(`[${requestId}] 🚀 Request: ${toolName} (${toolId})`);
-
-        // A. Fetch Tool Data (AND VERIFY OWNERSHIP)
-        const { data: tool } = await supabase
+        // Find the tool ID by looking up the name again (or optimizing this later)
+        const { data: tools } = await supabase
             .from('tools')
             .select('*')
-            .eq('id', toolId)
-            .or(`user_id.eq.${userId},is_public.eq.true`)
-            .single();
+            .eq('status', 'active')
+            .or(`user_id.eq.${userId},is_public.eq.true`);
 
-        if (!tool) {
-            return res.status(404).json({ error: 'Tool not found or access denied' });
+        // Find the matching tool definition
+        let foundTool = null;
+        for (const t of tools || []) {
+            const manifest = t.manifest as any;
+            if (manifest.tools.find((mt: any) => mt.name === name)) {
+                foundTool = t;
+                break;
+            }
         }
 
-        if (!tool.bundle_path) {
-            return res.status(400).json({ error: 'Tool not built (missing bundle_path)' });
-        }
+        if (!foundTool) throw new Error(`Tool ${name} not found`);
 
-        // B. PIPELINE 1: Prepare Environment (Secrets + Config)
-        const dbConfig = tool.configuration || {};
+        // Prepare Execution
+        const toolDir = await prepareTool(foundTool.id, foundTool.bundle_path);
+        const secretEnv = await getSecrets(foundTool.id);
+        const configEnv = foundTool.configuration?.env || {};
+        const defaultArgs = foundTool.configuration?.defaultArguments || {};
 
-        // 1. Fetch Secrets 
-        const secretEnv = await getSecrets(toolId);
+        const executor = new MCPExecutor(toolDir, foundTool.start_command, { ...configEnv, ...secretEnv });
+        const result = await executor.executeTool(name, { ...args, ...defaultArgs });
 
-        // 2. Fetch Config Env
-        const configEnv = dbConfig.env || {};
+        // Format Result for MCP
+        if (result.content) return result;
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    });
 
-        // 3. Merge
-        const finalEnv = {
-            ...configEnv,
-            ...secretEnv
-        };
+    // 5. Connect and Start
+    // Store the session so we can handle incoming messages later
+    sessions.set(transport.sessionId, { transport, server });
 
-        // C. PIPELINE 2: Prepare Arguments (Defaults + User)
-        const defaultArgs = dbConfig.defaultArguments || {};
-        const finalArgs = {
-            ...userArgs,
-            ...defaultArgs
-        };
+    // Cleanup when connection closes
+    res.on('close', () => {
+        sessions.delete(transport.sessionId);
+    });
 
-        // D. Provision Runtime
-        const toolDir = await prepareTool(toolId, tool.bundle_path);
-
-        // E. Execute
-        const executor = new MCPExecutor(toolDir, tool.start_command, finalEnv);
-        const result = await executor.executeTool(toolName, finalArgs);
-
-        console.log(`[${requestId}] ✅ Success`);
-        console.timeEnd(requestId);
-
-        return res.json({ success: true, result });
-
-    } catch (err: any) {
-        console.error(`[${requestId}] ❌ Failed:`, err.message);
-        console.timeEnd(requestId);
-
-        return res.status(500).json({
-            error: err.message,
-            toolId,
-            toolName
-        });
-    }
+    await server.connect(transport);
 });
+
+// ---------------------------------------------------------
+//  ENDPOINT 2: INCOMING MESSAGES (Cursor talks back here)
+// ---------------------------------------------------------
+app.post('/messages', async (req: Request, res: Response) => {
+    // The SDK sends the session ID in the query string
+    const sessionId = req.query.sessionId as string;
+    const session = sessions.get(sessionId);
+
+    if (!session) {
+        return res.status(404).send("Session not found");
+    }
+
+    // Pass the JSON body to the transport
+    await session.transport.handlePostMessage(req, res);
+});
+
+
 
 const PORT = process.env.PORT || 8000;
 app.listen(PORT, () => console.log(`Gateway listening on port ${PORT}`));
