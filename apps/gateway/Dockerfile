@@ -3,7 +3,7 @@
 # 1. Base Image
 FROM node:20-bookworm
 
-# 2. Install System Dependencies (Python, Build Tools for C++)
+# 2. Install System Dependencies
 RUN apt-get update && apt-get install -y \
     python3 \
     python3-pip \
@@ -18,30 +18,38 @@ RUN apt-get update && apt-get install -y \
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 ENV PATH="/root/.local/bin:${PATH}"
 
-# 4. Install PNPM (The Missing Piece) <--- NEW
-RUN npm install -g pnpm
+# 4. Install Global Tools
+RUN npm install -g pnpm typescript ts-node
 
 # 5. Set Working Directory
 WORKDIR /app
 
 # 6. Dependencies
-COPY package.json tsconfig.json ./
-# Use npm install (or pnpm install if you prefer, but npm works with the lockfile you have)
-RUN npm install
+COPY package.json ./
+# We install devDependencies too (false flag) just to ensure 'tsc' works
+RUN npm install --include=dev
 
 # 7. Source Code
 COPY src ./src
 
-# 8. Build
-RUN npm run build
+# 8. FORCE BUILD (The Fix)
+# Instead of relying on your local tsconfig, we generate a known-good one
+# that guarantees output to /app/dist
+RUN echo '{"compilerOptions":{"target":"es2020","module":"commonjs","outDir":"./dist","rootDir":"./src","strict":true,"esModuleInterop":true,"skipLibCheck":true,"forceConsistentCasingInFileNames":true}}' > tsconfig.docker.json
 
-# 9. Create Cache Directory
+# 9. Run Compilation using the custom config
+RUN npx tsc -p tsconfig.docker.json
+
+# 10. Debug Step: Verify the file exists (This will show in build logs if it fails)
+RUN ls -la dist/
+
+# 11. Create Cache Directory
 RUN mkdir -p runtime_cache
 
-# 10. Env & Start
+# 12. Env & Start
 ENV PYTHONUNBUFFERED=1
 ENV PORT=8000
 EXPOSE 8000
 
-# Force the start command to use Node directly (Bypassing pnpm scripts just in case)
+# 13. Start Command
 CMD ["node", "dist/index.js"]
