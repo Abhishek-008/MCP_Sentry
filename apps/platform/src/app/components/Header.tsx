@@ -3,7 +3,7 @@
 import React, { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useRouter, usePathname } from 'next/navigation';
-import { LogOut, User as UserIcon, LayoutDashboard, PlusCircle } from 'lucide-react';
+import { LogOut, User as UserIcon, LayoutDashboard, PlusCircle, ExternalLink } from 'lucide-react';
 import { createClient } from '../../../utils/supabase/client';
 import { User } from '@supabase/supabase-js';
 
@@ -70,6 +70,15 @@ export default function Header() {
                                 <PlusCircle className="w-4 h-4" />
                                 Register Server
                             </Link>
+                            <a 
+                                href='http://localhost:7860' 
+                                target='_blank'
+                                rel='noopener noreferrer'
+                                className='flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium transition-all text-gray-400 hover:text-white hover:bg-white/5'
+                            >
+                                <ExternalLink className='w-4 h-4' />
+                                MCP Gateway
+                            </a>
                         </nav>
                     )}
                 </div>
