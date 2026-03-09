@@ -1,0 +1,5 @@
+node_modules
+runtime_cache
+dist
+.env
+.git

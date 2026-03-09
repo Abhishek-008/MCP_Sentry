@@ -97,19 +97,18 @@ export default function Dashboard() {
 
     const getClientConfig = () => {
         if (!apiKey) return 'Generating key...';
+
+        // This points to your live Railway server
+        let gatewayUrl = process.env.NEXT_PUBLIC_GATEWAY_URL || 'http://localhost:8000';
+
+        if (gatewayUrl.endsWith('/')) {
+            gatewayUrl = gatewayUrl.slice(0, -1);
+        }
+
         return JSON.stringify({
             "mcpServers": {
-                "mcp-sentry-local": {
-                    "command": "npx",
-                    "args": [
-                        "-y",
-                        "tsx",
-                        "path/to/mcp-sentry/packages/bridge/index.ts"
-                    ],
-                    "env": {
-                        "MCP_API_KEY": apiKey,
-                        "PORT": "8000"
-                    }
+                "mcp-gateway": {
+                    "url": `${gatewayUrl}/sse?apiKey=${apiKey}`
                 }
             }
         }, null, 2);
@@ -265,8 +264,8 @@ export default function Dashboard() {
                                                 <button
                                                     onClick={() => toggleVisibility(server)}
                                                     className={`p-2 rounded-lg transition-colors border ${server.is_public
-                                                            ? 'bg-purple-900/20 border-purple-500/30 text-purple-400 hover:bg-purple-900/40'
-                                                            : 'bg-gray-800 border-gray-700 text-gray-400 hover:text-white hover:bg-gray-700'
+                                                        ? 'bg-purple-900/20 border-purple-500/30 text-purple-400 hover:bg-purple-900/40'
+                                                        : 'bg-gray-800 border-gray-700 text-gray-400 hover:text-white hover:bg-gray-700'
                                                         }`}
                                                     title={server.is_public ? "Make Private" : "Make Public"}
                                                 >
