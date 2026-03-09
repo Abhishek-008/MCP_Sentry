@@ -3,28 +3,87 @@
 import { GoogleGenerativeAI, FunctionDeclarationSchema } from '@google/generative-ai';
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
-import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { EventSource } from 'eventsource';
 
 // Polyfill EventSource for Node.js environment
 // @ts-ignore
 global.EventSource = EventSource;
 
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || '');
-
+// Global instance removed to support per-request API keys
 export interface ChatMessage {
     role: 'user' | 'assistant';
     content: string;
 }
 
-export async function sendMessage(history: ChatMessage[], message: string, serverConfig?: string) {
+export interface ToolCallInfo {
+    name: string;
+    args: Record<string, unknown>;
+    result: unknown;
+}
+
+export interface ToolInfo {
+    name: string;
+    description: string;
+}
+
+export interface PromptInfo {
+    name: string;
+    description: string;
+}
+
+export async function getTools(serverUrl: string): Promise<{ tools?: ToolInfo[]; error?: string }> {
+    let transport: SSEClientTransport | null = null;
+    try {
+        transport = new SSEClientTransport(new URL(serverUrl));
+        const mcpClient = new Client(
+            { name: 'mcp-tool-lister', version: '1.0.0' },
+            { capabilities: {} }
+        );
+        await mcpClient.connect(transport);
+        const { tools } = await mcpClient.listTools();
+        return {
+            tools: tools.map(t => ({
+                name: t.name,
+                description: t.description ?? 'No description provided.',
+            })),
+        };
+    } catch (err: any) {
+        return { error: err.message || 'Failed to list tools.' };
+    }
+}
+
+export async function getPrompts(serverUrl: string): Promise<{ prompts?: PromptInfo[]; error?: string }> {
+    let transport: SSEClientTransport | null = null;
+    try {
+        transport = new SSEClientTransport(new URL(serverUrl));
+        const mcpClient = new Client(
+            { name: 'mcp-prompt-lister', version: '1.0.0' },
+            { capabilities: {} }
+        );
+        await mcpClient.connect(transport);
+        const { prompts } = await mcpClient.listPrompts();
+        return {
+            prompts: prompts.map((p: any) => ({
+                name: p.name,
+                description: p.description ?? 'No description provided.',
+            })),
+        };
+    } catch (err: any) {
+        return { error: err.message || 'Failed to list prompts.' };
+    }
+}
+
+export async function sendMessage(history: ChatMessage[], message: string, serverUrl?: string, apiKey?: string, systemPrompt?: string) {
     let mcpClient: Client | null = null;
-    let transport: SSEClientTransport | StdioClientTransport | null = null;
+    let transport: SSEClientTransport | null = null;
 
     try {
-        if (!process.env.GEMINI_API_KEY) {
-            return { error: 'GEMINI_API_KEY is not configured in environment variables.' };
+        const useApiKey = apiKey || process.env.GEMINI_API_KEY;
+        if (!useApiKey) {
+            return { error: 'GEMINI_API_KEY is not configured in environment variables and no custom API Key was provided.' };
         }
+
+        const genAI = new GoogleGenerativeAI(useApiKey);
 
         // Initialize Gemini Model
         // Use gemini-2.0-flash-exp (or gemini-pro) which supports tools well
@@ -34,87 +93,10 @@ export async function sendMessage(history: ChatMessage[], message: string, serve
         let tools: any[] = [];
         let model: any;
 
-        // 1. Connect to MCP Server if configuration is provided
-        if (serverConfig) {
-            console.log("Current Server CWD:", process.cwd());
+        // 1. Connect to MCP Server if URL is provided
+        if (serverUrl) {
             try {
-                // Check if it's a URL (SSE) or JSON (Stdio)
-                const isUrl = serverConfig.startsWith('http://') || serverConfig.startsWith('https://');
-                const isJson = serverConfig.trim().startsWith('{');
-
-                if (isUrl) {
-                    transport = new SSEClientTransport(new URL(serverConfig));
-                } else if (isJson) {
-                    // Assume JSON configuration for Stdio
-                    try {
-                        const config = JSON.parse(serverConfig);
-                        let serverDef;
-
-                        // Support both raw server definition or the "mcpServers" format
-                        if (config.mcpServers) {
-                            const serverName = Object.keys(config.mcpServers)[0];
-                            if (serverName) {
-                                serverDef = config.mcpServers[serverName];
-                            }
-                        } else {
-                            serverDef = config;
-                        }
-
-                        if (!serverDef || !serverDef.command) {
-                            throw new Error("Invalid MCP configuration: missing 'command'");
-                        }
-
-                        transport = new StdioClientTransport({
-                            command: serverDef.command,
-                            args: serverDef.args || [],
-                            env: {
-                                ...process.env,
-                                ...serverDef.env
-                            }
-                        });
-                    } catch (parseErr: any) {
-                        throw new Error(`Failed to parse server configuration: ${parseErr.message}`);
-                    }
-                } else {
-                    // Treat as a direct file path (User convenience)
-                    // Auto-detect runtime based on extension
-                    const scriptPath = serverConfig.trim();
-                    const isJs = scriptPath.endsWith(".js");
-                    const isTs = scriptPath.endsWith(".ts");
-                    const isPy = scriptPath.endsWith(".py");
-
-                    let command = "";
-                    let args: string[] = [];
-
-                    if (isJs) {
-                        command = process.execPath; // node
-                        args = [scriptPath];
-                    } else if (isTs) {
-                        // Use npx tsx to execute typescript files
-                        command = "npx";
-                        args = ["-y", "tsx", scriptPath];
-                    } else if (isPy) {
-                        command = process.platform === "win32" ? "python" : "python3";
-                        args = [scriptPath];
-                    } else {
-                        // Default fallback or error
-                        throw new Error("Unknown script type. Please use .js, .ts, or .py, or provide a full JSON configuration.");
-                    }
-
-                    console.log(`Auto-detected MCP Server: ${command} ${args.join(' ')}`);
-
-                    transport = new StdioClientTransport({
-                        command,
-                        args,
-                        env: {
-                            ...process.env,
-                            // Fallback API Key for convenience if not set globally
-                            MCP_API_KEY: process.env.MCP_API_KEY || "mcp_sk_dce473d11962478091a279cc1992e07c",
-                            PORT: "8000"
-                        }
-                    });
-                }
-
+                transport = new SSEClientTransport(new URL(serverUrl));
                 mcpClient = new Client({
                     name: "mcp-client-nextjs",
                     version: "1.0.0",
@@ -122,16 +104,34 @@ export async function sendMessage(history: ChatMessage[], message: string, serve
                     capabilities: {}
                 });
 
-                await mcpClient.connect(transport!);
+                await mcpClient.connect(transport);
 
                 const toolsList = await mcpClient.listTools();
+
+                // Helper to clean schema for Gemini
+                const cleanSchema = (schema: any): any => {
+                    if (!schema || typeof schema !== 'object') return schema;
+
+                    const { additionalProperties, $schema, ...rest } = schema;
+
+                    if (rest.properties) {
+                        for (const key in rest.properties) {
+                            rest.properties[key] = cleanSchema(rest.properties[key]);
+                        }
+                    }
+                    if (rest.items) {
+                        rest.items = cleanSchema(rest.items);
+                    }
+
+                    return rest;
+                };
 
                 // Map MCP Tools to Gemini Tools
                 tools = [{
                     functionDeclarations: toolsList.tools.map(tool => ({
                         name: tool.name,
                         description: tool.description,
-                        parameters: tool.inputSchema as FunctionDeclarationSchema,
+                        parameters: cleanSchema(tool.inputSchema) as FunctionDeclarationSchema,
                     }))
                 }];
 
@@ -145,7 +145,16 @@ export async function sendMessage(history: ChatMessage[], message: string, serve
 
         model = genAI.getGenerativeModel({
             model: 'gemini-2.5-flash',
-            tools: tools
+            tools: tools,
+            systemInstruction: {
+                role: 'system',
+                parts: [{
+                    text: systemPrompt || "You are a helpful AI assistant. You have access to a set of tools from an MCP server. \n" +
+                        "Use these tools ONLY when the user's request specifically requires them. \n" +
+                        "For greetings like 'hi', 'hello', or general questions that do not require tool data, answer directly without using any tools. \n" +
+                        "Do not hallucinate tool calls. If a tool is not relevant, simply reply with text."
+                }]
+            }
         });
 
         // 2. Prepare Chat History
@@ -154,15 +163,14 @@ export async function sendMessage(history: ChatMessage[], message: string, serve
             parts: [{ text: h.content }],
         }));
 
-        // Gemini requires history to start with a 'user' role
-        // Provide a valid history by removing leading 'model' messages
-        const firstUserIndex = geminiHistory.findIndex(h => h.role === 'user');
-        if (firstUserIndex === -1) {
-            // No user messages in history yet (or only model messages)
-            // We can safely clear history because the current 'message' will be the first user message
-            geminiHistory = [];
-        } else if (firstUserIndex > 0) {
-            geminiHistory = geminiHistory.slice(firstUserIndex);
+        // Google Generative AI requires the first message in history to be from 'user'.
+        if (geminiHistory.length > 0 && geminiHistory[0].role === 'model') {
+            const firstUserIndex = geminiHistory.findIndex(h => h.role === 'user');
+            if (firstUserIndex !== -1) {
+                geminiHistory = geminiHistory.slice(firstUserIndex);
+            } else {
+                geminiHistory = [];
+            }
         }
 
         const chat = model.startChat({
@@ -173,49 +181,49 @@ export async function sendMessage(history: ChatMessage[], message: string, serve
         const result = await chat.sendMessage(message);
         const response = await result.response;
 
-        // 4. Handle Function Calls
-        // complex handling for tool use
+        // 4. Handle Function Calls (loop over all calls)
         const functionCalls = response.functionCalls();
         if (functionCalls && functionCalls.length > 0 && mcpClient) {
-            // Execute tools
-            // Note: Simplification - we only handle sequential calls here or the first one
-            // In a real robust implementation, we'd handle loop
+            // Execute all tool calls sequentially
+            let currentResponse = response;
+            let lastToolCall: ToolCallInfo | undefined;
 
-            const call = functionCalls[0];
-            console.log("Calling Tool:", call.name, call.args);
+            for (const call of functionCalls) {
+                console.log("Calling Tool:", call.name, call.args);
+                try {
+                    const toolResult = await mcpClient.callTool({
+                        name: call.name,
+                        arguments: call.args as any
+                    });
 
-            try {
-                const toolResult = await mcpClient.callTool({
-                    name: call.name,
-                    arguments: call.args as any
-                });
+                    lastToolCall = {
+                        name: call.name,
+                        args: call.args as Record<string, unknown>,
+                        result: toolResult.content,
+                    };
 
-                // Send result back to Gemini
-                // We need to construct the history update
-                // This is a bit tricky with the SDK stateless wrapper, 
-                // typically we'd send the tool response as a new message part
-
-                // Construct Tool Response Part
-                const toolResponsePart = [
-                    {
-                        functionResponse: {
-                            name: call.name,
-                            response: {
+                    const toolResponsePart = [
+                        {
+                            functionResponse: {
                                 name: call.name,
-                                content: toolResult.content
+                                response: {
+                                    name: call.name,
+                                    content: toolResult.content
+                                }
                             }
                         }
-                    }
-                ];
+                    ];
 
-                const finalResult = await chat.sendMessage(toolResponsePart);
-                const finalResponse = await finalResult.response;
-                return { text: finalResponse.text() };
+                    const intermediary = await chat.sendMessage(toolResponsePart);
+                    currentResponse = await intermediary.response;
 
-            } catch (toolErr: any) {
-                console.error("Tool Execution Error:", toolErr);
-                return { text: `Error executing tool ${call.name}: ${toolErr.message}` };
+                } catch (toolErr: any) {
+                    console.error("Tool Execution Error:", toolErr);
+                    return { text: `Error executing tool ${call.name}: ${toolErr.message}`, toolCall: lastToolCall };
+                }
             }
+
+            return { text: currentResponse.text(), toolCall: lastToolCall };
 
         } else {
             return { text: response.text() };
@@ -227,19 +235,8 @@ export async function sendMessage(history: ChatMessage[], message: string, serve
     } finally {
         // Cleanup MCP connection
         if (transport) {
-            // For Stdio, we might want to close to kill the process
-            // For SSE, close connection
-            // However, separating 'transport' variable types is hard without casting or distinct handling
-            // transport.close() exists on both? 
-            // StdioClientTransport: close() kills the process usually.
-            // SSEClientTransport: close() closes the event source.
-
-            try {
-                // @ts-ignore
-                await mcpClient?.close();
-            } catch (e) {
-                console.error("Error closing client:", e);
-            }
+            // Close transport/client if method exists or relying on garbage collection/disconnect
+            // mcpClient?.close(); // Client doesn't strictly have close, but transport might
         }
     }
 }
