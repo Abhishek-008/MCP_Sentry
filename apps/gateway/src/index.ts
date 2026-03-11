@@ -150,4 +150,4 @@ app.get('/api/messages', (req, res) => {
 });
 
 const PORT = process.env.PORT || 8000;
-app.listen(PORT, () => console.log(`Gateway listening on port ${PORT}`));
+app.listen(PORT as number, '0.0.0.0', () => console.log(`Gateway listening on port ${PORT} (0.0.0.0)`));
