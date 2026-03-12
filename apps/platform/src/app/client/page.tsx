@@ -281,10 +281,13 @@ export default function ClientPage() {
                     return;
                 }
                 activationPayload.serverUrl = selectedRegisteredServer.url;
+                activationPayload.transportType = selectedRegisteredServer.transport_type || 'sse';
             }
             
             setShowConnectModal(false);
             setMessages(prev => [...prev, { role: 'assistant', content: `Activating session with **${selectedRegisteredServer.name}**...` }]);
+            
+            console.log('[Client] Activation payload:', activationPayload);
             
             try {
                 const response = await fetch('/api/chat/activate', {

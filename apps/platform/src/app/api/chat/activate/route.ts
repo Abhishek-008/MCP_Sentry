@@ -30,6 +30,8 @@ export async function POST(req: NextRequest) {
     const body: ActivateRequest = await req.json();
     const { serverId, serverUrl, serverName, location, transportType, localConfig, selectedTools, sessionId: existingSessionId } = body;
 
+    console.log('[Session Activate] Request:', { serverId, serverName, location, transportType, serverUrl });
+
     // Check for reconnection
     if (existingSessionId && sessions.has(existingSessionId)) {
       const session = sessions.get(existingSessionId)!;
