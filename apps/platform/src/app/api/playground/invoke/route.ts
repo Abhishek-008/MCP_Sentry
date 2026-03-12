@@ -3,6 +3,7 @@ import { createClient } from '@supabase/supabase-js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 
 export const dynamic = 'force-dynamic';
 
@@ -66,7 +67,12 @@ export async function POST(req: Request) {
             }
 
             console.log(`[Playground] Connecting to remote server: ${server.url}`);
-            transport = new SSEClientTransport(new URL(server.url));
+            const transportType = server.transport_type || 'sse';
+            if (transportType === 'http' || transportType === 'streamable_http') {
+                transport = new StreamableHTTPClientTransport(new URL(server.url));
+            } else {
+                transport = new SSEClientTransport(new URL(server.url));
+            }
         } else {
             // Local server
             const config = server.local_config;

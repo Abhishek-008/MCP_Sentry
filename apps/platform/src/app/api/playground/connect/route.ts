@@ -3,6 +3,7 @@ import { createClient } from '@supabase/supabase-js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 
 export const dynamic = 'force-dynamic';
 
@@ -85,7 +86,12 @@ export async function POST(req: Request) {
                     }, { status: 500 });
                 }
 
-                transport = new SSEClientTransport(new URL(server.url));
+                const transportType = server.transport_type || 'sse';
+                if (transportType === 'http' || transportType === 'streamable_http') {
+                    transport = new StreamableHTTPClientTransport(new URL(server.url));
+                } else {
+                    transport = new SSEClientTransport(new URL(server.url));
+                }
             }
 
             // Create MCP client
@@ -109,7 +115,7 @@ export async function POST(req: Request) {
             }));
 
             // Fetch prompts (optional)
-            let prompts = [];
+            let prompts: any[] = [];
             try {
                 const promptsResult = await client.listPrompts();
                 prompts = promptsResult.prompts.map((prompt) => ({
@@ -122,7 +128,7 @@ export async function POST(req: Request) {
             }
 
             // Fetch resources (optional)
-            let resources = [];
+            let resources: any[] = [];
             try {
                 const resourcesResult = await client.listResources();
                 resources = resourcesResult.resources.map((resource) => ({

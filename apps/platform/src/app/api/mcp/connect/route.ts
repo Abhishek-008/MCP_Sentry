@@ -2,13 +2,14 @@ import { NextResponse } from 'next/server';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 
 export const dynamic = 'force-dynamic';
 
 interface RemoteConnectionRequest {
     type: 'remote';
     url: string;
-    transport: 'sse' | 'http';
+    transportType?: 'sse' | 'http' | 'streamable_http'; // Made optional with default to sse
     headers?: Record<string, string>;
 }
 
@@ -61,13 +62,21 @@ export async function POST(req: Request) {
                     }, { status: 400 });
                 }
 
-                // For both SSE and HTTP, we use SSEClientTransport
-                // (Streamable HTTP requires a different transport not yet implemented)
-                const opts = data.headers ? { 
-                    requestInit: { headers: new Headers(data.headers) } 
-                } : undefined;
-
-                transport = new SSEClientTransport(new URL(data.url), opts);
+                const transportType = data.transportType || 'sse'; // Default to SSE
+                
+                if (transportType === 'http' || transportType === 'streamable_http') {
+                    // Use StreamableHTTP transport for JSON-RPC over HTTP
+                    const opts = data.headers ? { 
+                        requestInit: { headers: new Headers(data.headers) } 
+                    } : undefined;
+                    transport = new StreamableHTTPClientTransport(new URL(data.url), opts);
+                } else {
+                    // Use SSE transport for Server-Sent Events
+                    const opts = data.headers ? { 
+                        requestInit: { headers: new Headers(data.headers) } 
+                    } : undefined;
+                    transport = new SSEClientTransport(new URL(data.url), opts);
+                }
             }
 
             // Create MCP client
@@ -91,7 +100,7 @@ export async function POST(req: Request) {
             }));
 
             // Fetch prompts (optional capability)
-            let prompts = [];
+            let prompts: any[] = [];
             try {
                 const promptsResult = await client.listPrompts();
                 prompts = promptsResult.prompts.map((prompt) => ({
@@ -104,7 +113,7 @@ export async function POST(req: Request) {
             }
 
             // Fetch resources (optional capability)
-            let resources = [];
+            let resources: any[] = [];
             try {
                 const resourcesResult = await client.listResources();
                 resources = resourcesResult.resources.map((resource) => ({

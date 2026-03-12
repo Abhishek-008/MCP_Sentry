@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { randomUUID } from 'crypto';
 import { EventSource } from 'eventsource';
 import { sessions, SessionData, cleanupOldSessions } from '../sessions';
@@ -14,6 +15,7 @@ interface ActivateRequest {
   serverUrl?: string;
   serverName?: string;
   location?: 'local' | 'remote';
+  transportType?: 'sse' | 'http' | 'streamable_http'; // For remote servers
   localConfig?: {
     command: string;
     args?: string[];
@@ -26,7 +28,7 @@ interface ActivateRequest {
 export async function POST(req: NextRequest) {
   try {
     const body: ActivateRequest = await req.json();
-    const { serverId, serverUrl, serverName, location, localConfig, selectedTools, sessionId: existingSessionId } = body;
+    const { serverId, serverUrl, serverName, location, transportType, localConfig, selectedTools, sessionId: existingSessionId } = body;
 
     // Check for reconnection
     if (existingSessionId && sessions.has(existingSessionId)) {
@@ -46,7 +48,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    let transport: SSEClientTransport | StdioClientTransport;
+    let transport: SSEClientTransport | StdioClientTransport | StreamableHTTPClientTransport;
     let mcpClient: Client;
 
     // Create appropriate transport
@@ -58,8 +60,14 @@ export async function POST(req: NextRequest) {
         env: localConfig.env || {},
       });
     } else if (serverUrl) {
-      console.log('Creating SSE transport for remote server:', serverUrl);
-      transport = new SSEClientTransport(new URL(serverUrl));
+      const useTransportType = transportType || 'sse';
+      if (useTransportType === 'http' || useTransportType === 'streamable_http') {
+        console.log('Creating StreamableHTTP transport for remote server:', serverUrl);
+        transport = new StreamableHTTPClientTransport(new URL(serverUrl));
+      } else {
+        console.log('Creating SSE transport for remote server:', serverUrl);
+        transport = new SSEClientTransport(new URL(serverUrl));
+      }
     } else {
       return NextResponse.json(
         { error: 'Invalid server configuration' },
