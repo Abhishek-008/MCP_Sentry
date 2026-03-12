@@ -3,7 +3,7 @@
 import React, { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useRouter, usePathname } from 'next/navigation';
-import { LogOut, User as UserIcon, LayoutDashboard, PlusCircle } from 'lucide-react';
+import { LogOut, User as UserIcon, LayoutDashboard, MessageSquare, Terminal } from 'lucide-react';
 import { createClient } from '../../../utils/supabase/client';
 import { User } from '@supabase/supabase-js';
 
@@ -64,17 +64,17 @@ export default function Header() {
                                 Dashboard
                             </Link>
                             <Link
-                                href="/deploy"
-                                className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium transition-all ${isActive('/deploy')}`}
+                                href="/playground"
+                                className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium transition-all ${isActive('/playground')}`}
                             >
-                                <PlusCircle className="w-4 h-4" />
-                                Register Server
+                                <Terminal className="w-4 h-4" />
+                                Playground
                             </Link>
                             <Link
                                 href="/client"
                                 className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium transition-all ${isActive('/client')}`}
                             >
-                                <code className="text-xs font-bold">{'>_'}</code>
+                                <MessageSquare className="w-4 h-4" />
                                 Client
                             </Link>
                         </nav>

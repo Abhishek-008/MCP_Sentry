@@ -66,7 +66,16 @@ export default function ClientPage() {
     const [tools, setTools] = useState<ToolInfo[]>([]);
     const [toolsLoading, setToolsLoading] = useState(false);
     const [expandedTool, setExpandedTool] = useState<string | null>(null);
+    
+    // Registered servers state
+    const [connectionMode, setConnectionMode] = useState<'manual' | 'registry'>('manual');
+    const [registeredServers, setRegisteredServers] = useState<any[]>([]);
+    const [loadingServers, setLoadingServers] = useState(false);
+    const [selectedRegisteredServer, setSelectedRegisteredServer] = useState<any | null>(null);
+    const [availableToolsForSelection, setAvailableToolsForSelection] = useState<any[]>([]);
+    const [selectedTools, setSelectedTools] = useState<Set<string>>(new Set());
     const [copiedIndex, setCopiedIndex] = useState<number | null>(null);
+    const [sessionId, setSessionId] = useState<string | null>(null); // For registry-based connections
 
     const [prompts, setPrompts] = useState<PromptInfo[]>([]);
     const [promptsLoading, setPromptsLoading] = useState(false);
@@ -95,6 +104,8 @@ export default function ClientPage() {
             const { data: { user } } = await supabase.auth.getUser();
             if (user) {
                 setUserId(user.id);
+                
+                // Fetch API key
                 const { data } = await supabase
                     .from('user_keys')
                     .select('api_key')
@@ -137,8 +148,17 @@ export default function ClientPage() {
         const newHistory: DisplayMessage[] = [...messages, { role: 'user', content: userMessage } as ChatMessage];
         setMessages(newHistory);
 
+        console.log('Sending message with sessionId:', sessionId, 'connectedServer:', connectedServer);
+
         try {
-            const result = await sendMessage(chatHistory, userMessage, connectedServer || undefined, geminiKey || undefined, systemPrompt);
+            const result = await sendMessage(
+                chatHistory,
+                userMessage,
+                sessionId ? undefined : (connectedServer || undefined), // Only pass serverUrl for manual connections
+                geminiKey || undefined,
+                systemPrompt,
+                sessionId || undefined // Pass sessionId for registry connections
+            );
 
             if (result.error) {
                 setError(result.error);
@@ -162,47 +182,168 @@ export default function ClientPage() {
         }
     };
 
-    const connectServer = async () => {
-        if (!serverConfig) return;
-        setConnectedServer(serverConfig);
-        setShowConnectModal(false);
-        setMessages(prev => [...prev, { role: 'assistant', content: `Connecting to MCP Server...` }]);
-
-        setToolsLoading(true);
-        setPromptsLoading(true);
-        setTools([]);
-        setPrompts([]);
-
-        const [toolsResult, promptsResult] = await Promise.all([
-            getTools(serverConfig),
-            getPrompts(serverConfig)
-        ]);
-
-        setToolsLoading(false);
-        setPromptsLoading(false);
-
-        let statusMsg = '';
-        if (toolsResult.tools) {
-            setTools(toolsResult.tools);
-            statusMsg += `Extracted **${toolsResult.tools.length} tools**. `;
-        } else {
-            statusMsg += `Could not list tools: ${toolsResult.error}. `;
+    const fetchRegisteredServers = async () => {
+        if (!userId) return;
+        setLoadingServers(true);
+        try {
+            const { data } = await supabase
+                .from('mcp_servers')
+                .select('*')
+                .or(`owner_id.eq.${userId},is_public.eq.true`)
+                .eq('status', 'active')
+                .order('created_at', { ascending: false });
+            
+            if (data) setRegisteredServers(data);
+        } catch (err) {
+            console.error('Failed to fetch servers:', err);
+        } finally {
+            setLoadingServers(false);
         }
-
-        if (promptsResult.prompts) {
-            setPrompts(promptsResult.prompts);
-            statusMsg += `Extracted **${promptsResult.prompts.length} prompts**.`;
-        } else {
-            statusMsg += `Could not list prompts: ${promptsResult.error}.`;
-        }
-
-        setMessages(prev => [
-            ...prev.slice(0, -1),
-            { role: 'assistant', content: `Connection established! ${statusMsg}` }
-        ]);
     };
 
-    const handleDisconnect = () => {
+    const handleSelectRegisteredServer = async (server: any) => {
+        setSelectedRegisteredServer(server);
+        setAvailableToolsForSelection(server.tools || []);
+        setSelectedTools(new Set());
+    };
+
+    const toggleToolSelection = (toolName: string) => {
+        setSelectedTools(prev => {
+            const newSet = new Set(prev);
+            if (newSet.has(toolName)) {
+                newSet.delete(toolName);
+            } else {
+                newSet.add(toolName);
+            }
+            return newSet;
+        });
+    };
+
+    const connectServer = async () => {
+        if (connectionMode === 'manual') {
+            if (!serverConfig) return;
+            setConnectedServer(serverConfig);
+            setShowConnectModal(false);
+            setMessages(prev => [...prev, { role: 'assistant', content: `Connecting to MCP Server...` }]);
+
+            setToolsLoading(true);
+            setPromptsLoading(true);
+            setTools([]);
+            setPrompts([]);
+
+            const [toolsResult, promptsResult] = await Promise.all([
+                getTools(serverConfig),
+                getPrompts(serverConfig)
+            ]);
+
+            setToolsLoading(false);
+            setPromptsLoading(false);
+
+            let statusMsg = '';
+            if (toolsResult.tools) {
+                setTools(toolsResult.tools);
+                statusMsg += `Extracted **${toolsResult.tools.length} tools**. `;
+            } else {
+                statusMsg += `Could not list tools: ${toolsResult.error}. `;
+            }
+
+            if (promptsResult.prompts) {
+                setPrompts(promptsResult.prompts);
+                statusMsg += `Extracted **${promptsResult.prompts.length} prompts**.`;
+            } else {
+                statusMsg += `Could not list prompts: ${promptsResult.error}.`;
+            }
+
+            setMessages(prev => [
+                ...prev.slice(0, -1),
+                { role: 'assistant', content: `Connection established! ${statusMsg}` }
+            ]);
+        } else {
+            // Registry mode - create session with selected tools
+            if (!selectedRegisteredServer || selectedTools.size === 0) return;
+            
+            // Check if server is local (requires backend, works in session-based approach)
+            const isLocal = selectedRegisteredServer.server_location === 'local';
+            
+            // Prepare activation request
+            const activationPayload: any = {
+                serverId: selectedRegisteredServer.id,
+                serverName: selectedRegisteredServer.name,
+                location: selectedRegisteredServer.server_location,
+                selectedTools: Array.from(selectedTools),
+            };
+            
+            if (isLocal) {
+                activationPayload.localConfig = selectedRegisteredServer.local_config;
+            } else {
+                if (!selectedRegisteredServer.url) {
+                    alert('This remote server does not have a URL configured.');
+                    return;
+                }
+                activationPayload.serverUrl = selectedRegisteredServer.url;
+            }
+            
+            setShowConnectModal(false);
+            setMessages(prev => [...prev, { role: 'assistant', content: `Activating session with **${selectedRegisteredServer.name}**...` }]);
+            
+            try {
+                const response = await fetch('/api/chat/activate', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(activationPayload),
+                });
+                
+                if (!response.ok) {
+                    const errorData = await response.json();
+                    throw new Error(errorData.error || 'Failed to activate session');
+                }
+                
+                const data = await response.json();
+                console.log('Session activated:', data);
+                console.log('Setting sessionId in state:', data.sessionId);
+                setSessionId(data.sessionId);
+                setConnectedServer(selectedRegisteredServer.name); // Display name instead of URL
+                setTools(data.tools);
+                setPrompts(selectedRegisteredServer.prompts || []);
+                
+                setMessages(prev => [
+                    ...prev.slice(0, -1),
+                    { 
+                        role: 'assistant', 
+                        content: `Session activated! Connected to **${selectedRegisteredServer.name}** with ${data.tools.length} tools available.` 
+                    }
+                ]);
+                
+            } catch (error: any) {
+                setMessages(prev => [
+                    ...prev.slice(0, -1),
+                    { 
+                        role: 'assistant', 
+                        content: `Failed to activate session: ${error.message}` 
+                    }
+                ]);
+            }
+            
+            // Reset selection
+            setSelectedRegisteredServer(null);
+            setSelectedTools(new Set());
+            setAvailableToolsForSelection([]);
+        }
+    };
+
+    const handleDisconnect = async () => {
+        // Deactivate session if active
+        if (sessionId) {
+            try {
+                await fetch(`/api/chat/activate?sessionId=${sessionId}`, {
+                    method: 'DELETE',
+                });
+            } catch (error) {
+                console.error('Error deactivating session:', error);
+            }
+            setSessionId(null);
+        }
+        
         setConnectedServer(null);
         setTools([]);
         setPrompts([]);
@@ -783,39 +924,242 @@ export default function ClientPage() {
             {/* Connect Modal */}
             {showConnectModal && (
                 <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm">
-                    <div className="bg-[#111317] border border-[#2A2E37] rounded-xl p-6 w-full max-w-md shadow-2xl">
-                        <h3 className="text-lg font-bold mb-4 text-white">Connect MCP Server manually</h3>
-                        <div className="space-y-4">
-                            <div>
-                                <label className="block text-xs font-semibold uppercase tracking-wider text-gray-400 mb-2">
-                                    MCP Server URL (SSE)
-                                </label>
-                                <input
-                                    type="text"
-                                    value={serverConfig}
-                                    onChange={(e) => setServerConfig(e.target.value)}
-                                    placeholder="http://localhost:8000/sse"
-                                    className="w-full bg-[#16181E] border border-[#2A2E37] rounded-lg px-4 py-2.5 focus:outline-none focus:border-emerald-500/50 text-sm font-mono text-white placeholder-[#4A505E]"
-                                />
-                                <p className="text-[11px] text-gray-500 mt-2 leading-relaxed">
-                                    Enter the full URL to the SSE endpoint of your MCP server infrastructure.
-                                </p>
-                            </div>
-                            <div className="flex justify-end gap-3 font-medium text-sm pt-2">
+                    <div className="bg-[#111317] border border-[#2A2E37] rounded-xl w-full max-w-2xl shadow-2xl max-h-[90vh] overflow-hidden flex flex-col">
+                        {/* Header */}
+                        <div className="p-6 border-b border-[#2A2E37]">
+                            <h3 className="text-lg font-bold text-white mb-4">Add MCP Server</h3>
+                            
+                            {/* Mode Toggle */}
+                            <div className="flex gap-2 bg-[#16181E] p-1 rounded-lg">
                                 <button
-                                    onClick={() => setShowConnectModal(false)}
-                                    className="text-gray-400 hover:text-white px-3 py-2 transition-colors border border-transparent"
+                                    onClick={() => {
+                                        setConnectionMode('manual');
+                                        setSelectedRegisteredServer(null);
+                                        setSelectedTools(new Set());
+                                    }}
+                                    className={`flex-1 px-4 py-2 rounded-md text-sm font-medium transition-colors ${
+                                        connectionMode === 'manual'
+                                            ? 'bg-emerald-500 text-black'
+                                            : 'text-gray-400 hover:text-white'
+                                    }`}
                                 >
-                                    Cancel
+                                    Manual URL
                                 </button>
                                 <button
-                                    onClick={connectServer}
-                                    disabled={!serverConfig}
-                                    className="bg-emerald-500 hover:bg-emerald-600 text-[#0f1710] px-5 py-2 rounded-lg font-bold disabled:opacity-50 transition-colors shadow-sm"
+                                    onClick={() => {
+                                        setConnectionMode('registry');
+                                        setServerConfig('');
+                                        if (registeredServers.length === 0) fetchRegisteredServers();
+                                    }}
+                                    className={`flex-1 px-4 py-2 rounded-md text-sm font-medium transition-colors ${
+                                        connectionMode === 'registry'
+                                            ? 'bg-purple-500 text-white'
+                                            : 'text-gray-400 hover:text-white'
+                                    }`}
                                 >
-                                    Connect server
+                                    From Registry
                                 </button>
                             </div>
+                        </div>
+
+                        {/* Content */}
+                        <div className="flex-1 overflow-y-auto p-6">
+                            {connectionMode === 'manual' ? (
+                                <div className="space-y-4">
+                                    <div>
+                                        <label className="block text-xs font-semibold uppercas tracking-wider text-gray-400 mb-2">
+                                            MCP Server URL (SSE)
+                                        </label>
+                                        <input
+                                            type="text"
+                                            value={serverConfig}
+                                            onChange={(e) => setServerConfig(e.target.value)}
+                                            placeholder="http://localhost:8000/sse"
+                                            className="w-full bg-[#16181E] border border-[#2A2E37] rounded-lg px-4 py-2.5 focus:outline-none focus:border-emerald-500/50 text-sm font-mono text-white placeholder-[#4A505E]"
+                                        />
+                                        <p className="text-[11px] text-gray-500 mt-2 leading-relaxed">
+                                            Enter the full URL to the SSE endpoint of your MCP server infrastructure.
+                                        </p>
+                                    </div>
+                                </div>
+                            ) : (
+                                <div className="space-y-4">
+                                    {loadingServers ? (
+                                        <div className="flex items-center justify-center py-12">
+                                            <Loader2 className="w-6 h-6 text-emerald-500 animate-spin" />
+                                        </div>
+                                    ) : registeredServers.length === 0 ? (
+                                        <div className="text-center py-12">
+                                            <Database className="w-12 h-12 mx-auto mb-3 text-gray-600" />
+                                            <p className="text-sm text-gray-400 mb-4">No registered servers found</p>
+                                            <button
+                                                onClick={() => setShowConnectModal(false)}
+                                                className="text-purple-400 hover:text-purple-300 text-sm"
+                                            >
+                                                Register a server first →
+                                            </button>
+                                        </div>
+                                    ) : !selectedRegisteredServer ? (
+                                        <div className="space-y-3">
+                                            <label className="block text-xs font-semibold uppercase tracking-wider text-gray-400 mb-1">
+                                                Select a Server
+                                            </label>
+                                            <div className="bg-emerald-500/10 border border-emerald-500/30 rounded-lg p-3 mb-3">
+                                                <p className="text-xs text-emerald-300 leading-relaxed">
+                                                    <CheckCircle2 className="w-3 h-3 inline mr-1" />
+                                                    Both local and remote servers are supported via backend sessions.
+                                                </p>
+                                            </div>
+                                            {registeredServers.map(server => {
+                                                return (
+                                                    <button
+                                                        key={server.id}
+                                                        onClick={() => handleSelectRegisteredServer(server)}
+                                                        className="w-full text-left p-4 rounded-lg border transition-all border-[#2A2E37] hover:border-purple-500/50 hover:bg-purple-500/5 group"
+                                                    >
+                                                        <div className="flex items-start justify-between gap-3">
+                                                            <div className="flex-1 min-w-0">
+                                                                <div className="font-semibold text-white truncate mb-1 flex items-center gap-2">
+                                                                    {server.name}
+                                                                </div>
+                                                                {server.description && (
+                                                                    <p className="text-xs text-gray-400 line-clamp-2 mb-2">
+                                                                        {server.description}
+                                                                    </p>
+                                                                )}
+                                                                <div className="flex items-center gap-2 text-xs">
+                                                                    <span className={`px-2 py-0.5 rounded ${
+                                                                        server.server_location === 'remote'
+                                                                            ? 'bg-blue-500/10 text-blue-400'
+                                                                            : 'bg-gray-700 text-gray-500'
+                                                                    }`}>
+                                                                        {server.server_location}
+                                                                    </span>
+                                                                    <span className="text-gray-500">
+                                                                        {server.tool_count || 0} tools
+                                                                    </span>
+                                                                </div>
+                                                            </div>
+                                                            <ChevronRight className="w-5 h-5 text-gray-600 group-hover:text-purple-400 flex-shrink-0" />
+                                                        </div>
+                                                    </button>
+                                                );
+                                            })}
+                                        </div>
+                                    ) : (
+                                        <div className="space-y-4">
+                                            {/* Back button and server info */}
+                                            <div className="flex items-center gap-3 pb-3 border-b border-[#2A2E37]">
+                                                <button
+                                                    onClick={() => {
+                                                        setSelectedRegisteredServer(null);
+                                                        setSelectedTools(new Set());
+                                                    }}
+                                                    className="text-gray-400 hover:text-white transition-colors"
+                                                >
+                                                    ← Back
+                                                </button>
+                                                <div className="flex-1 min-w-0">
+                                                    <div className="font-semibold text-white truncate">
+                                                        {selectedRegisteredServer.name}
+                                                    </div>
+                                                    <div className="text-xs text-gray-500">
+                                                        Select tools to connect
+                                                    </div>
+                                                </div>
+                                            </div>
+
+                                            {/* Tools selection */}
+                                            {availableToolsForSelection.length === 0 ? (
+                                                <div className="text-center py-8 text-gray-500 text-sm">
+                                                    No tools available on this server
+                                                </div>
+                                            ) : (
+                                                <div className="space-y-2">
+                                                    <div className="flex items-center justify-between mb-3">
+                                                        <label className="block text-xs font-semibold uppercase tracking-wider text-gray-400">
+                                                            Available Tools ({availableToolsForSelection.length})
+                                                        </label>
+                                                        <button
+                                                            onClick={() => {
+                                                                if (selectedTools.size === availableToolsForSelection.length) {
+                                                                    setSelectedTools(new Set());
+                                                                } else {
+                                                                    setSelectedTools(new Set(availableToolsForSelection.map(t => t.name)));
+                                                                }
+                                                            }}
+                                                            className="text-xs text-purple-400 hover:text-purple-300"
+                                                        >
+                                                            {selectedTools.size === availableToolsForSelection.length ? 'Deselect All' : 'Select All'}
+                                                        </button>
+                                                    </div>
+                                                    <div className="space-y-2 max-h-[400px] overflow-y-auto custom-scrollbar">
+                                                        {availableToolsForSelection.map(tool => (
+                                                            <label
+                                                                key={tool.name}
+                                                                className={`flex items-start gap-3 p-3 rounded-lg border cursor-pointer transition-all ${
+                                                                    selectedTools.has(tool.name)
+                                                                        ? 'border-purple-500/50 bg-purple-500/10'
+                                                                        : 'border-[#2A2E37] hover:border-purple-500/30 hover:bg-[#16181E]'
+                                                                }`}
+                                                            >
+                                                                <input
+                                                                    type="checkbox"
+                                                                    checked={selectedTools.has(tool.name)}
+                                                                    onChange={() => toggleToolSelection(tool.name)}
+                                                                    className="mt-1 w-4 h-4 rounded border-gray-700 text-purple-500 focus:ring-purple-500"
+                                                                />
+                                                                <div className="flex-1 min-w-0">
+                                                                    <div className="font-mono text-sm font-medium text-white truncate">
+                                                                        {tool.name}
+                                                                    </div>
+                                                                    {tool.description && (
+                                                                        <p className="text-xs text-gray-400 mt-1 line-clamp-2">
+                                                                            {tool.description}
+                                                                        </p>
+                                                                    )}
+                                                                </div>
+                                                            </label>
+                                                        ))}
+                                                    </div>
+                                                    {selectedTools.size > 0 && (
+                                                        <div className="mt-3 p-3 bg-purple-500/10 border border-purple-500/30 rounded-lg">
+                                                            <p className="text-xs text-purple-300">
+                                                                {selectedTools.size} tool{selectedTools.size !== 1 ? 's' : ''} selected
+                                                            </p>
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            )}
+                                        </div>
+                                    )}
+                                </div>
+                            )}
+                        </div>
+
+                        {/* Footer */}
+                        <div className="p-6 border-t border-[#2A2E37] flex justify-end gap-3">
+                            <button
+                                onClick={() => {
+                                    setShowConnectModal(false);
+                                    setConnectionMode('manual');
+                                    setSelectedRegisteredServer(null);
+                                    setSelectedTools(new Set());
+                                }}
+                                className="text-gray-400 hover:text-white px-4 py-2 transition-colors"
+                            >
+                                Cancel
+                            </button>
+                            <button
+                                onClick={connectServer}
+                                disabled={
+                                    (connectionMode === 'manual' && !serverConfig) ||
+                                    (connectionMode === 'registry' && (!selectedRegisteredServer || selectedTools.size === 0))
+                                }
+                                className="bg-emerald-500 hover:bg-emerald-600 text-black px-5 py-2 rounded-lg font-bold disabled:opacity-50 disabled:cursor-not-allowed transition-colors shadow-sm"
+                            >
+                                Connect {connectionMode === 'registry' && selectedTools.size > 0 && `(${selectedTools.size} tools)`}
+                            </button>
                         </div>
                     </div>
                 </div>

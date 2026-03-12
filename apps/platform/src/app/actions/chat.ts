@@ -73,7 +73,52 @@ export async function getPrompts(serverUrl: string): Promise<{ prompts?: PromptI
     }
 }
 
-export async function sendMessage(history: ChatMessage[], message: string, serverUrl?: string, apiKey?: string, systemPrompt?: string) {
+export async function sendMessage(
+    history: ChatMessage[],
+    message: string,
+    serverUrl?: string,
+    apiKey?: string,
+    systemPrompt?: string,
+    sessionId?: string // New parameter for session-based chat
+) {
+    // If sessionId is provided, use session-based chat API
+    if (sessionId) {
+        console.log('Using session-based chat with sessionId:', sessionId);
+        try {
+            const url = `${process.env.NEXT_PUBLIC_BASE_URL || 'http://localhost:3000'}/api/chat/stream`;
+            const payload = {
+                sessionId,
+                message,
+                history,
+                apiKey: apiKey || process.env.GEMINI_API_KEY,
+                systemPrompt,
+            };
+            console.log('Fetching:', url, 'with payload:', payload);
+            
+            const response = await fetch(url, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+            });
+
+            console.log('Response status:', response.status, response.ok);
+
+            if (!response.ok) {
+                const error = await response.json();
+                console.error('API error response:', error);
+                return { error: error.error || 'Failed to send message' };
+            }
+
+            const result = await response.json();
+            console.log('API success response:', result);
+            return result;
+        } catch (error: any) {
+            console.error('Session-based chat error:', error);
+            return { error: error.message || 'Failed to process request' };
+        }
+    }
+
+    // Original direct URL-based chat (for manual URL input)
     let mcpClient: Client | null = null;
     let transport: SSEClientTransport | null = null;
 
@@ -86,9 +131,8 @@ export async function sendMessage(history: ChatMessage[], message: string, serve
         const genAI = new GoogleGenerativeAI(useApiKey);
 
         // Initialize Gemini Model
-        // Use gemini-2.0-flash-exp (or gemini-pro) which supports tools well
-        // Falling back to gemini-1.5-flash as requested previously
-        const modelName = 'gemini-2.5-flash'; // Using a known strong model for tools if possible, or fallback
+        // Using gemini-3-flash-preview which supports function calling well
+        const modelName = 'gemini-3-flash-preview'; // Using a known strong model for tools if possible, or fallback
 
         let tools: any[] = [];
         let model: any;
