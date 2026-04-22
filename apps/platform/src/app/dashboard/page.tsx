@@ -11,6 +11,7 @@ import Header from '../components/Header';
 import Footer from '../components/Footer';
 import ToolsModal from './ToolsModal';
 import RegisterServerModal from './RegisterServerModal';
+import SplineBackground from '../components/SplineBackground';
 
 interface Tool {
     id: string;
@@ -178,7 +179,14 @@ export default function Dashboard() {
     }
 
     return (
-        <div className="min-h-screen bg-black text-gray-100 font-mono flex flex-col">
+        <div className="min-h-screen bg-black text-gray-100 font-mono flex flex-col relative overflow-hidden">
+            {/* Spline 3D Background */}
+            <div className="fixed inset-0 z-0 opacity-60">
+                <SplineBackground />
+            </div>
+            
+            {/* Content Layer */}
+            <div className="relative z-10">
             <Header />
 
             <div className="flex-1 max-w-7xl mx-auto px-6 py-12 w-full">
@@ -532,16 +540,19 @@ export default function Dashboard() {
 
             <Footer />
 
-            <ToolsModal
-                isOpen={isModalOpen}
-                onClose={() => setIsModalOpen(false)}
-                manifest={selectedManifest}
-            />
-
             <RegisterServerModal
                 isOpen={isRegisterModalOpen}
                 onClose={() => setIsRegisterModalOpen(false)}
                 onSuccess={() => fetchData()}
+            />
+            </div>
+            {/* End Content Layer */}
+
+            {/* Modals - outside content layer to prevent z-index issues */}
+            <ToolsModal
+                isOpen={isModalOpen}
+                onClose={() => setIsModalOpen(false)}
+                manifest={selectedManifest}
             />
         </div>
     );
