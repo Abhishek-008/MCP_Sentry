@@ -69,7 +69,7 @@ export default function LoginPage() {
             const { error } = await supabase.auth.signInWithOAuth({
                 provider: 'google',
                 options: {
-                    redirectTo: `${location.origin}/auth/callback?next=/dashboard`
+                    redirectTo: `https://mcp-sentry-platform.vercel.app/auth/callback?next=/dashboard`
                 },
             });
             if (error) throw error;
