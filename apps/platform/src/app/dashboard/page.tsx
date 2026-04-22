@@ -448,7 +448,9 @@ export default function Dashboard() {
                                                                         </span>
                                                                     )}
                                                                     {server.is_public && (
-                                                                        <Globe className="w-3 h-3 text-purple-400" title="Public" />
+                                                                        <span title="Public" className="flex items-center">
+                                                                            <Globe className="w-3 h-3 text-purple-400" />
+                                                                        </span>
                                                                     )}
                                                                 </div>
                                                                 {server.description && (
