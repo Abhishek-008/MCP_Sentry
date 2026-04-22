@@ -2,6 +2,7 @@ import React from 'react';
 import { ArrowRight, Shield, Zap, Lock, Cloud, Code } from 'lucide-react';
 import Header from './components/Header';
 import Footer from './components/Footer';
+import SplineBackground from './components/SplineBackground';
 
 export default function HomePage() {
   // Mock user state - replace with actual auth
@@ -12,11 +13,18 @@ export default function HomePage() {
   };
 
   return (
-    <div className="min-h-screen bg-black text-gray-100 font-mono flex flex-col">
+    <div className="min-h-screen bg-black text-gray-100 font-mono flex flex-col relative overflow-hidden">
+      {/* Spline 3D Background */}
+      <div className="fixed inset-0 z-0 opacity-70">
+        <SplineBackground />
+      </div>
+
+      {/* Content Layer */}
+      <div className="relative z-10">
       <Header/>
 
       {/* Hero Section */}
-      <section className="max-w-7xl mx-auto px-6 pt-20 pb-32">
+      <section className="max-w-7xl mx-auto px-6 pt-[250px] pb-40">
         <div className="text-center space-y-8">
           <div className="inline-block">
             <span className="px-4 py-1.5 bg-emerald-500/10 border border-emerald-500/20 rounded-full text-emerald-400 text-sm">
@@ -169,6 +177,8 @@ export default function HomePage() {
       </section>
 
       <Footer />
+      </div>
+      {/* End Content Layer */}
     </div>
   );
 }
